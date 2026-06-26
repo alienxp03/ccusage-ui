@@ -33,3 +33,9 @@ or:
 ```bash
 wails build
 ```
+
+## GitHub Actions macOS build
+
+A manual workflow is available under **Actions → macOS Build**. It builds a macOS `.app`, packages it as a zip, and uploads it as a workflow artifact.
+
+The current artifact is unsigned/not notarized, so macOS Gatekeeper may require right-click → Open or local signing for distribution.

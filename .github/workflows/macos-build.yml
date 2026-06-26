@@ -1,0 +1,61 @@
+name: macOS Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref to build"
+        required: false
+        default: "master"
+      platform:
+        description: "Wails platform target"
+        required: true
+        default: "darwin/arm64"
+        type: choice
+        options:
+          - darwin/arm64
+          - darwin/amd64
+
+jobs:
+  build:
+    name: Build macOS app
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install Wails CLI
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@latest
+
+      - name: Build app
+        run: wails build -platform "${{ inputs.platform }}"
+
+      - name: Package app zip
+        run: |
+          set -euo pipefail
+          platform_slug="${{ inputs.platform }}"
+          platform_slug="${platform_slug//\//-}"
+          artifact="ccusage-ui-${platform_slug}.zip"
+          ditto -c -k --keepParent build/bin/ccusage-ui.app "$artifact"
+          echo "artifact=$artifact" >> "$GITHUB_ENV"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.artifact }}
+          path: ${{ env.artifact }}
+          if-no-files-found: error

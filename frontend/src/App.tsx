@@ -10,7 +10,6 @@ import {
   DollarSign,
   FolderGit2,
   FolderOpen,
-  Gauge,
   MessageSquare,
   Layers3,
   RefreshCw,
@@ -33,7 +32,7 @@ import {
   SaveConfig,
 } from "../wailsjs/go/main/App";
 
-type ReportKey = "daily" | "weekly" | "monthly" | "session" | "blocks" | "projects" | "settings";
+type ReportKey = "daily" | "weekly" | "monthly" | "session" | "projects" | "settings";
 type IndexGroupBy = "project" | "agent" | "model";
 type SortField = "lastActivity" | "totalCost" | "totalTokens";
 type DatePreset = "all" | "today" | "7d" | "30d" | "month" | "custom";
@@ -204,33 +203,55 @@ const reports: ReportDefinition[] = [
   {key: "weekly", label: "Weekly", description: "Usage grouped by week", icon: BarChart3},
   {key: "monthly", label: "Monthly", description: "Usage grouped by month", icon: Layers3},
   {key: "session", label: "Sessions", description: "Conversation-level usage", icon: Activity},
-  {key: "blocks", label: "Blocks", description: "Billing block view", icon: Gauge},
   {key: "projects", label: "Projects", description: "Indexed usage by project", icon: FolderGit2},
   {key: "settings", label: "Settings", description: "Configure project grouping", icon: Settings2},
 ];
 
-const sources = [
-  "all",
-  "claude",
-  "codex",
-  "opencode",
-  "amp",
-  "pi",
-  "goose",
-  "copilot",
-  "gemini",
-  "qwen",
-];
+const sources = ["all", "codex", "pi"];
 
-const defaultSince = new Date(Date.now() - 1000 * 60 * 60 * 24 * 30).toISOString().slice(0, 10);
 const pageSizeOptions = [10, 25, 50];
+const defaultDatePreset: DatePreset = "7d";
+
+function dateRangeForPreset(preset: DatePreset) {
+  const today = new Date();
+  const isoToday = today.toISOString().slice(0, 10);
+  if (preset === "all") {
+    return {since: "", until: ""};
+  }
+  if (preset === "today") {
+    return {since: isoToday, until: isoToday};
+  }
+  if (preset === "7d" || preset === "30d") {
+    const days = preset === "7d" ? 7 : 30;
+    return {since: new Date(Date.now() - 1000 * 60 * 60 * 24 * days).toISOString().slice(0, 10), until: ""};
+  }
+  if (preset === "month") {
+    return {since: new Date(today.getFullYear(), today.getMonth(), 1).toISOString().slice(0, 10), until: ""};
+  }
+  return {
+    since: localStorage.getItem("ccusage-ui.since") ?? "",
+    until: localStorage.getItem("ccusage-ui.until") ?? "",
+  };
+}
+
+function initialDatePreset() {
+  const stored = localStorage.getItem("ccusage-ui.datePreset") as DatePreset | null;
+  return stored && ["all", "today", "7d", "30d", "month", "custom"].includes(stored) ? stored : defaultDatePreset;
+}
+
+function initialSource() {
+  const stored = localStorage.getItem("ccusage-ui.source");
+  return stored && sources.includes(stored) ? stored : "all";
+}
 
 function App() {
+  const initialPreset = initialDatePreset();
+  const initialRange = dateRangeForPreset(initialPreset);
   const [report, setReport] = useState<ReportKey>("projects");
-  const [source, setSource] = useState("all");
-  const [since, setSince] = useState("");
-  const [until, setUntil] = useState("");
-  const [datePreset, setDatePreset] = useState<DatePreset>("all");
+  const [source, setSource] = useState(initialSource);
+  const [since, setSince] = useState(initialRange.since);
+  const [until, setUntil] = useState(initialRange.until);
+  const [datePreset, setDatePreset] = useState<DatePreset>(initialPreset);
   const [offline, setOffline] = useState(false);
   const [noCost, setNoCost] = useState(false);
   const [query, setQuery] = useState("");
@@ -257,6 +278,18 @@ function App() {
   useEffect(() => {
     void loadReport();
   }, [report, source, since, until, offline, noCost]);
+
+  useEffect(() => {
+    localStorage.setItem("ccusage-ui.source", source);
+  }, [source]);
+
+  useEffect(() => {
+    localStorage.setItem("ccusage-ui.datePreset", datePreset);
+    if (datePreset === "custom") {
+      localStorage.setItem("ccusage-ui.since", since);
+      localStorage.setItem("ccusage-ui.until", until);
+    }
+  }, [datePreset, since, until]);
 
   const filteredProjects = useMemo(() => {
     const projects = projectIndex?.projects ?? [];
@@ -379,7 +412,7 @@ function App() {
       const response = await GetReport({
         report,
         source,
-        since: since || defaultSince,
+        since,
         until,
         offline,
         noCost,
@@ -514,40 +547,16 @@ function App() {
 
   function applyDatePreset(nextPreset: DatePreset) {
     setDatePreset(nextPreset);
-    const today = new Date();
-    const isoToday = today.toISOString().slice(0, 10);
-    if (nextPreset === "all") {
-      setSince("");
-      setUntil("");
-      return;
-    }
-    if (nextPreset === "today") {
-      setSince(isoToday);
-      setUntil(isoToday);
-      return;
-    }
-    if (nextPreset === "7d" || nextPreset === "30d") {
-      const days = nextPreset === "7d" ? 7 : 30;
-      setSince(new Date(Date.now() - 1000 * 60 * 60 * 24 * days).toISOString().slice(0, 10));
-      setUntil("");
-      return;
-    }
-    if (nextPreset === "month") {
-      setSince(new Date(today.getFullYear(), today.getMonth(), 1).toISOString().slice(0, 10));
-      setUntil("");
-      return;
-    }
+    const range = dateRangeForPreset(nextPreset);
+    setSince(range.since);
+    setUntil(range.until);
   }
 
   function selectReport(nextReport: ReportKey) {
     setReport(nextReport);
     setSelectedIndex(0);
-    if (nextReport === "projects" || nextReport === "settings") {
-      applyDatePreset("all");
+    if (nextReport === "settings") {
       return;
-    }
-    if (!since) {
-      applyDatePreset("30d");
     }
   }
 
@@ -1694,6 +1703,16 @@ function activeReport(report: ReportKey) {
 }
 
 function rowTitle(row: ReportRow, report: ReportKey) {
+  if (report === "daily") {
+    const date = parseDateOnly(row.period);
+    return date ? formatDateOnly(date) : row.period || "Unknown period";
+  }
+  if (report === "weekly") {
+    return periodRangeLabel(row.period, 6);
+  }
+  if (report === "monthly") {
+    return formatMonthPeriod(row.period);
+  }
   if (report === "session") {
     const projectPath = row.metadata?.projectPath;
     if (typeof projectPath === "string" && projectPath.length > 0) {
@@ -1701,6 +1720,45 @@ function rowTitle(row: ReportRow, report: ReportKey) {
     }
   }
   return row.period || "Unknown period";
+}
+
+function periodRangeLabel(period: string, endOffsetDays: number) {
+  const start = parseDateOnly(period);
+  if (!start) {
+    return period || "Unknown period";
+  }
+  const end = new Date(start);
+  end.setUTCDate(end.getUTCDate() + endOffsetDays);
+  return `${formatDateOnly(start)} – ${formatDateOnly(end)}`;
+}
+
+function parseDateOnly(value: string) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) {
+    return null;
+  }
+  return new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])));
+}
+
+function formatDateOnly(value: Date) {
+  return new Intl.DateTimeFormat("en-GB", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+    timeZone: "UTC",
+  }).format(value);
+}
+
+function formatMonthPeriod(period: string) {
+  const match = /^(\d{4})-(\d{2})/.exec(period);
+  if (!match) {
+    return period || "Unknown period";
+  }
+  return new Intl.DateTimeFormat("en-GB", {
+    month: "short",
+    year: "numeric",
+    timeZone: "UTC",
+  }).format(new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, 1)));
 }
 
 function cleanProjectPath(value: string) {
