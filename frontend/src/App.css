@@ -1,0 +1,72 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --color-bg: 31 29 27;
+  --color-sidebar: 38 35 32;
+  --color-panel: 43 40 36;
+  --color-surface: 50 46 41;
+  --color-text: 244 237 228;
+  --color-muted: 166 153 139;
+  --color-line: 70 63 56;
+  --color-accent: 225 103 55;
+  --color-accent-soft: 91 54 39;
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    sans-serif;
+  color: rgb(var(--color-text));
+  background: rgb(var(--color-bg));
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  color-scheme: dark;
+}
+
+button,
+input,
+select {
+  font: inherit;
+}
+
+@layer components {
+  .control {
+    @apply rounded-md border border-app-line bg-app-surface px-3 text-sm text-app-text outline-none transition placeholder:text-app-muted/75 focus:border-app-accent focus:ring-2 focus:ring-app-accent/15;
+  }
+
+  .button {
+    @apply inline-flex h-9 items-center gap-2 rounded-md border border-app-line bg-app-surface px-3 text-sm font-medium text-app-text transition hover:bg-app-panel disabled:cursor-not-allowed disabled:opacity-60;
+  }
+
+  .icon-button {
+    @apply grid h-9 w-9 place-items-center rounded-md border border-app-line bg-app-surface text-app-muted transition hover:bg-app-panel hover:text-app-text disabled:cursor-not-allowed disabled:opacity-60;
+  }
+
+  .toggle {
+    @apply inline-flex h-8 items-center gap-2 rounded-md border border-app-line bg-app-surface px-3 text-xs font-medium text-app-muted;
+  }
+
+  .toggle input {
+    @apply h-3.5 w-3.5 accent-app-accent;
+  }
+
+  .section-title {
+    @apply mb-2 text-xs font-semibold uppercase tracking-normal text-app-muted;
+  }
+
+  .table-head {
+    @apply px-3 py-2 font-medium;
+  }
+
+  .table-cell {
+    @apply px-3 py-2.5 text-app-text;
+  }
+}
