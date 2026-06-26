@@ -413,7 +413,7 @@ function App() {
         report,
         source,
         since,
-        until,
+        until: ccusageUntilDate(until),
         offline,
         noCost,
       });
@@ -434,7 +434,7 @@ function App() {
       const request = {
         source,
         since,
-        until,
+        until: ccusageUntilDate(until),
         offline,
         noCost,
       };
@@ -1847,6 +1847,19 @@ function sortUsageItems<T extends {lastActivity: string; totalCost: number; tota
 function dateValue(value: string) {
   const timestamp = new Date(value).getTime();
   return Number.isNaN(timestamp) ? 0 : timestamp;
+}
+
+function ccusageUntilDate(value: string) {
+  return addDaysToDateOnly(value, 1);
+}
+
+function addDaysToDateOnly(value: string, days: number) {
+  const date = parseDateOnly(value);
+  if (!date) {
+    return value;
+  }
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
 }
 
 function formatCost(value: number, noCost: boolean) {
