@@ -1,4 +1,6 @@
-import {Fragment, type KeyboardEvent as ReactKeyboardEvent, useEffect, useMemo, useState} from "react";
+import {Fragment, type KeyboardEvent as ReactKeyboardEvent, useEffect, useMemo, useRef, useState} from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import {
   Activity,
   BarChart3,
@@ -33,6 +35,8 @@ import {
 
 type ReportKey = "daily" | "weekly" | "monthly" | "session" | "blocks" | "projects" | "settings";
 type IndexGroupBy = "project" | "agent" | "model";
+type SortField = "lastActivity" | "totalCost" | "totalTokens";
+type DatePreset = "all" | "today" | "7d" | "30d" | "month" | "custom";
 
 type RunnerInfo = {
   name: string;
@@ -112,6 +116,9 @@ type IndexedSession = {
   activeDurationSeconds: number;
   originator: string;
   clientSource: string;
+  model: string;
+  provider: string;
+  reasoningLevel: string;
 };
 
 type SessionPreviewResponse = {
@@ -123,6 +130,9 @@ type SessionPreviewResponse = {
   activeDurationSeconds: number;
   originator: string;
   clientSource: string;
+  model: string;
+  provider: string;
+  reasoningLevel: string;
   cached: boolean;
   supported: boolean;
   unavailableHint: string;
@@ -142,6 +152,9 @@ type SessionConversationResponse = {
   activeDurationSeconds: number;
   originator: string;
   clientSource: string;
+  model: string;
+  provider: string;
+  reasoningLevel: string;
   messages: ConversationMessage[] | null;
   supported: boolean;
   unavailableHint: string;
@@ -210,16 +223,19 @@ const sources = [
 ];
 
 const defaultSince = new Date(Date.now() - 1000 * 60 * 60 * 24 * 30).toISOString().slice(0, 10);
+const pageSizeOptions = [10, 25, 50];
 
 function App() {
   const [report, setReport] = useState<ReportKey>("projects");
   const [source, setSource] = useState("all");
   const [since, setSince] = useState("");
   const [until, setUntil] = useState("");
+  const [datePreset, setDatePreset] = useState<DatePreset>("all");
   const [offline, setOffline] = useState(false);
   const [noCost, setNoCost] = useState(false);
   const [query, setQuery] = useState("");
   const [indexGroupBy, setIndexGroupBy] = useState<IndexGroupBy>("project");
+  const [projectSort, setProjectSort] = useState<SortField>("lastActivity");
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [runner, setRunner] = useState<RunnerInfo | null>(null);
   const [data, setData] = useState<ReportResponse | null>(null);
@@ -240,47 +256,47 @@ function App() {
 
   useEffect(() => {
     void loadReport();
-  }, [report, source, offline, noCost]);
+  }, [report, source, since, until, offline, noCost]);
 
   const filteredProjects = useMemo(() => {
     const projects = projectIndex?.projects ?? [];
     const trimmed = query.trim().toLowerCase();
-    if (!trimmed) {
-      return projects;
-    }
+    const filtered = !trimmed
+      ? projects
+      : projects.filter((project) => {
+          const haystack = [
+            project.projectName,
+            project.projectPath,
+            project.agents?.join(" "),
+            project.modelBreakdowns?.map((model) => model.modelName).join(" "),
+          ]
+            .join(" ")
+            .toLowerCase();
+          return haystack.includes(trimmed);
+        });
 
-    return projects.filter((project) => {
-      const haystack = [
-        project.projectName,
-        project.projectPath,
-        project.agents?.join(" "),
-        project.modelBreakdowns?.map((model) => model.modelName).join(" "),
-      ]
-        .join(" ")
-        .toLowerCase();
-      return haystack.includes(trimmed);
-    });
-  }, [projectIndex, query]);
+    return sortUsageItems(filtered, projectSort);
+  }, [projectIndex, projectSort, query]);
 
   const filteredIndexGroups = useMemo(() => {
     const groups = indexGroupBy === "agent" ? projectIndex?.agentGroups ?? [] : projectIndex?.modelGroups ?? [];
     const trimmed = query.trim().toLowerCase();
-    if (!trimmed) {
-      return groups;
-    }
+    const filtered = !trimmed
+      ? groups
+      : groups.filter((group) => {
+          const haystack = [
+            group.name,
+            group.groupBy,
+            group.agents?.join(" "),
+            group.modelBreakdowns?.map((model) => model.modelName).join(" "),
+          ]
+            .join(" ")
+            .toLowerCase();
+          return haystack.includes(trimmed);
+        });
 
-    return groups.filter((group) => {
-      const haystack = [
-        group.name,
-        group.groupBy,
-        group.agents?.join(" "),
-        group.modelBreakdowns?.map((model) => model.modelName).join(" "),
-      ]
-        .join(" ")
-        .toLowerCase();
-      return haystack.includes(trimmed);
-    });
-  }, [indexGroupBy, projectIndex, query]);
+    return sortUsageItems(filtered, projectSort);
+  }, [indexGroupBy, projectIndex, projectSort, query]);
 
   const filteredRows = useMemo(() => {
     const rows = data?.rows ?? [];
@@ -467,6 +483,9 @@ function App() {
           activeDurationSeconds: typed.activeDurationSeconds,
           originator: typed.originator,
           clientSource: typed.clientSource,
+          model: typed.model,
+          provider: typed.provider,
+          reasoningLevel: typed.reasoningLevel,
           cached: true,
           supported: typed.supported,
           unavailableHint: typed.unavailableHint,
@@ -493,15 +512,42 @@ function App() {
     setConversationLoading(false);
   }
 
+  function applyDatePreset(nextPreset: DatePreset) {
+    setDatePreset(nextPreset);
+    const today = new Date();
+    const isoToday = today.toISOString().slice(0, 10);
+    if (nextPreset === "all") {
+      setSince("");
+      setUntil("");
+      return;
+    }
+    if (nextPreset === "today") {
+      setSince(isoToday);
+      setUntil(isoToday);
+      return;
+    }
+    if (nextPreset === "7d" || nextPreset === "30d") {
+      const days = nextPreset === "7d" ? 7 : 30;
+      setSince(new Date(Date.now() - 1000 * 60 * 60 * 24 * days).toISOString().slice(0, 10));
+      setUntil("");
+      return;
+    }
+    if (nextPreset === "month") {
+      setSince(new Date(today.getFullYear(), today.getMonth(), 1).toISOString().slice(0, 10));
+      setUntil("");
+      return;
+    }
+  }
+
   function selectReport(nextReport: ReportKey) {
     setReport(nextReport);
     setSelectedIndex(0);
     if (nextReport === "projects" || nextReport === "settings") {
-      setSince("");
+      applyDatePreset("all");
       return;
     }
     if (!since) {
-      setSince(defaultSince);
+      applyDatePreset("30d");
     }
   }
 
@@ -584,7 +630,7 @@ function App() {
                   />
                 </label>
 
-                <div className="mt-3 grid grid-cols-3 gap-2">
+                <div className="mt-3 grid grid-cols-2 gap-2">
                   <select className="control h-9" value={source} onChange={(event) => setSource(event.target.value)}>
                     {sources.map((item) => (
                       <option key={item} value={item}>
@@ -592,12 +638,36 @@ function App() {
                       </option>
                     ))}
                   </select>
-                  <input className="control h-9" type="date" value={since} onChange={(event) => setSince(event.target.value)} />
-                  <input className="control h-9" type="date" value={until} onChange={(event) => setUntil(event.target.value)} />
+                  <select className="control h-9" value={datePreset} onChange={(event) => applyDatePreset(event.target.value as DatePreset)}>
+                    <option value="all">All time</option>
+                    <option value="today">Today</option>
+                    <option value="7d">Last 7 days</option>
+                    <option value="30d">Last 30 days</option>
+                    <option value="month">This month</option>
+                    <option value="custom">Custom range</option>
+                  </select>
                 </div>
 
-                <div className="mt-3 flex gap-2">
+                {datePreset === "custom" ? (
+                  <div className="mt-2 grid grid-cols-2 gap-2">
+                    <input
+                      className="control h-9"
+                      type="date"
+                      value={since}
+                      onChange={(event) => setSince(event.target.value)}
+                    />
+                    <input
+                      className="control h-9"
+                      type="date"
+                      value={until}
+                      onChange={(event) => setUntil(event.target.value)}
+                    />
+                  </div>
+                ) : null}
+
+                <div className="mt-3 space-y-2">
                   {report === "projects" ? (
+                    <>
                     <div className="flex rounded-md border border-app-line bg-app-surface p-0.5">
                       {(["project", "agent", "model"] as IndexGroupBy[]).map((item) => (
                         <button
@@ -615,15 +685,22 @@ function App() {
                         </button>
                       ))}
                     </div>
+                    <label className="flex items-center gap-2 text-xs text-app-muted">
+                      Sort
+                      <select
+                        className="control h-8 flex-1"
+                        value={projectSort}
+                        onChange={(event) => setProjectSort(event.target.value as SortField)}
+                      >
+                        <option value="lastActivity">Last activity</option>
+                        <option value="totalCost">Cost</option>
+                        <option value="totalTokens">Total tokens</option>
+                      </select>
+                    </label>
+                    </>
                   ) : null}
-                  <label className="toggle">
-                    <input type="checkbox" checked={offline} onChange={(event) => setOffline(event.target.checked)} />
-                    Offline
-                  </label>
-                  <label className="toggle">
-                    <input type="checkbox" checked={noCost} onChange={(event) => setNoCost(event.target.checked)} />
-                    No cost
-                  </label>
+
+
                 </div>
               </>
             ) : null}
@@ -805,12 +882,7 @@ function App() {
 
                   <ModelBreakdownTable models={activeSelectedRow.modelBreakdowns ?? []} noCost={noCost} />
 
-                  <div className="mt-6">
-                    <h3 className="section-title">Command</h3>
-                    <code className="block overflow-x-auto rounded-md border border-app-line bg-app-surface px-3 py-2 text-xs text-app-muted">
-                      {data?.command?.join(" ")}
-                    </code>
-                  </div>
+
                 </>
               ) : null}
             </div>
@@ -975,6 +1047,7 @@ function ConversationModal({
   onOpenSource: (path: string) => void;
 }) {
   const messages = conversation?.messages ?? [];
+  const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -987,6 +1060,12 @@ function ConversationModal({
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [onClose]);
 
+  useEffect(() => {
+    if (!loading && messages.length > 0) {
+      requestAnimationFrame(() => messagesEndRef.current?.scrollIntoView({block: "end"}));
+    }
+  }, [loading, messages.length]);
+
   return (
     <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 px-6 py-6">
       <div className="flex max-h-full w-full max-w-5xl flex-col overflow-hidden rounded-lg border border-app-line bg-app-bg shadow-2xl">
@@ -997,7 +1076,7 @@ function ConversationModal({
               Conversation
             </div>
             <div className="mt-1 truncate text-xs text-app-muted">
-              {session.agent}{conversationClientLabel(conversation, session) ? ` · ${conversationClientLabel(conversation, session)}` : ""} · {shortSessionId(session.sessionId)} · Duration {formatDuration(conversation?.activeDurationSeconds || session.activeDurationSeconds)} · {cleanProjectPath(session.projectPath)}
+              {session.agent}{conversationClientLabel(conversation, session) ? ` · ${conversationClientLabel(conversation, session)}` : ""}{conversationModelLabel(conversation, session) ? ` · ${conversationModelLabel(conversation, session)}` : ""} · {shortSessionId(session.sessionId)} · Duration {formatDuration(conversation?.activeDurationSeconds || session.activeDurationSeconds)} · {cleanProjectPath(session.projectPath)}
             </div>
           </div>
           <div className="flex items-center gap-2">
@@ -1027,6 +1106,7 @@ function ConversationModal({
               {messages.map((message, index) => (
                 <ConversationBubble key={`${message.timestamp}-${message.role}-${index}`} message={message} />
               ))}
+              <div ref={messagesEndRef} />
             </div>
           )}
         </div>
@@ -1049,7 +1129,9 @@ function ConversationBubble({message}: {message: ConversationMessage}) {
           <span className="font-semibold uppercase tracking-normal text-app-text">{isUser ? "You" : "Assistant"}</span>
           <span>{formatConversationDateTime(message.timestamp)}</span>
         </div>
-        <div className="whitespace-pre-wrap break-words text-sm leading-6 text-app-text">{message.text}</div>
+        <div className="markdown-body text-sm leading-6 text-app-text">
+          <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.text}</ReactMarkdown>
+        </div>
       </div>
     </article>
   );
@@ -1109,7 +1191,7 @@ function ProjectDetail({
       <div className="mt-6">
         <div className="mb-2 flex items-center justify-between gap-3">
           <div className="min-w-0">
-            <h3 className="section-title mb-0">Grouped Path</h3>
+            <h3 className="section-title mb-0">Path</h3>
             {hasGroupedPaths ? (
               <div className="mt-1 text-xs text-app-muted">
                 {physicalPathCount} physical paths grouped by {project.groupingRule || "grouping rule"}
@@ -1153,13 +1235,6 @@ function ProjectDetail({
         onOpenSession={onOpenSession}
         onOpenPath={onOpenPath}
       />
-
-      <div className="mt-6">
-        <h3 className="section-title">Index</h3>
-        <code className="block overflow-x-auto rounded-md border border-app-line bg-app-surface px-3 py-2 text-xs text-app-muted">
-          {database}
-        </code>
-      </div>
     </>
   );
 }
@@ -1203,7 +1278,7 @@ function PhysicalPathsModal({
 
         <div className="overflow-y-auto px-5 py-5">
           <div className="mb-4">
-            <h3 className="section-title">Grouped Path</h3>
+            <h3 className="section-title">Path</h3>
             <code className="block overflow-x-auto rounded-md border border-app-line bg-app-surface px-3 py-2 text-xs text-app-muted">
               {cleanProjectPath(project.projectPath)}
             </code>
@@ -1244,13 +1319,6 @@ function IndexGroupDetail({group, noCost, database}: {group: IndexGroup; noCost:
       </div>
 
       <ModelBreakdownTable models={group.modelBreakdowns ?? []} noCost={noCost} />
-
-      <div className="mt-6">
-        <h3 className="section-title">Index</h3>
-        <code className="block overflow-x-auto rounded-md border border-app-line bg-app-surface px-3 py-2 text-xs text-app-muted">
-          {database}
-        </code>
-      </div>
     </>
   );
 }
@@ -1310,6 +1378,18 @@ function RecentSessionsTable({
   onOpenPath: (path: string) => void;
 }) {
   const [expandedModels, setExpandedModels] = useState<Record<string, boolean>>({});
+  const [sessionSort, setSessionSort] = useState<SortField>("lastActivity");
+  const [pageSize, setPageSize] = useState(10);
+  const [page, setPage] = useState(0);
+
+  const sortedSessions = useMemo(() => sortUsageItems(sessions, sessionSort), [sessionSort, sessions]);
+  const pageCount = Math.max(1, Math.ceil(sortedSessions.length / pageSize));
+  const safePage = Math.min(page, pageCount - 1);
+  const pagedSessions = sortedSessions.slice(safePage * pageSize, safePage * pageSize + pageSize);
+
+  useEffect(() => {
+    setPage(0);
+  }, [sessions, sessionSort, pageSize]);
 
   function toggleModels(session: IndexedSession) {
     const key = sessionPreviewKey(session);
@@ -1318,7 +1398,22 @@ function RecentSessionsTable({
 
   return (
     <div className="mt-6">
-      <h3 className="section-title">Recent Sessions</h3>
+      <div className="mb-2 flex items-center justify-between gap-3">
+        <h3 className="section-title mb-0">Sessions</h3>
+        <div className="flex items-center gap-2 text-xs text-app-muted">
+          <span>Sort</span>
+          <select className="control h-8" value={sessionSort} onChange={(event) => setSessionSort(event.target.value as SortField)}>
+            <option value="lastActivity">Last activity</option>
+            <option value="totalCost">Cost</option>
+            <option value="totalTokens">Total tokens</option>
+          </select>
+          <select className="control h-8" value={pageSize} onChange={(event) => setPageSize(Number(event.target.value))}>
+            {pageSizeOptions.map((size) => (
+              <option key={size} value={size}>{size}/page</option>
+            ))}
+          </select>
+        </div>
+      </div>
       <div className="overflow-hidden rounded-md border border-app-line bg-app-surface">
         <table className="w-full text-sm">
           <thead className="border-b border-app-line bg-app-panel text-xs text-app-muted">
@@ -1335,7 +1430,7 @@ function RecentSessionsTable({
             </tr>
           </thead>
           <tbody>
-            {sessions.map((session) => {
+            {pagedSessions.map((session) => {
               const key = sessionPreviewKey(session);
               const sourcePath = previewCache[key]?.sourcePath || session.messageSourcePath;
               const models = session.modelBreakdowns ?? [];
@@ -1392,7 +1487,7 @@ function RecentSessionsTable({
               </Fragment>
             );
             })}
-            {sessions.length === 0 ? (
+            {sortedSessions.length === 0 ? (
               <tr>
                 <td className="table-cell text-app-muted" colSpan={9}>
                   No indexed sessions available.
@@ -1402,6 +1497,21 @@ function RecentSessionsTable({
           </tbody>
         </table>
       </div>
+      {sortedSessions.length > pageSize ? (
+        <div className="mt-3 flex items-center justify-between text-xs text-app-muted">
+          <span>
+            {safePage * pageSize + 1}–{Math.min((safePage + 1) * pageSize, sortedSessions.length)} of {sortedSessions.length}
+          </span>
+          <div className="flex gap-2">
+            <button className="button h-8" disabled={safePage === 0} onClick={() => setPage((current) => Math.max(0, current - 1))}>
+              Previous
+            </button>
+            <button className="button h-8" disabled={safePage >= pageCount - 1} onClick={() => setPage((current) => Math.min(pageCount - 1, current + 1))}>
+              Next
+            </button>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -1447,11 +1557,15 @@ function SessionModelBreakdownRow({models, noCost}: {models: ModelBreakdown[]; n
 function SessionAgentCell({session, cachedPreview}: {session: IndexedSession; cachedPreview?: SessionPreviewResponse}) {
   const originator = cachedPreview?.originator || session.originator;
   const clientSource = cachedPreview?.clientSource || session.clientSource;
+  const model = cachedPreview?.model || session.model;
+  const reasoningLevel = cachedPreview?.reasoningLevel || session.reasoningLevel;
   const client = [originator, clientSource].filter(Boolean).join(" · ");
+  const modelInfo = [model, reasoningLevel].filter(Boolean).join(" · ");
   return (
     <div className="space-y-1">
       <AgentNameChips agents={[session.agent]} />
       {client ? <div className="text-[11px] leading-4 text-app-muted">{client}</div> : null}
+      {modelInfo ? <div className="text-[11px] leading-4 text-app-muted">{modelInfo}</div> : null}
     </div>
   );
 }
@@ -1634,6 +1748,12 @@ function conversationClientLabel(conversation: SessionConversationResponse | nul
     .join(" · ");
 }
 
+function conversationModelLabel(conversation: SessionConversationResponse | null, session: IndexedSession) {
+  return [conversation?.model || session.model, conversation?.reasoningLevel || session.reasoningLevel]
+    .filter(Boolean)
+    .join(" · ");
+}
+
 function modelLabel(row: ReportRow) {
   const models = row.modelsUsed ?? [];
   if (models.length === 0) {
@@ -1655,6 +1775,20 @@ function agentNames(row: ReportRow) {
   }
 
   return [row.agent || "all"];
+}
+
+function sortUsageItems<T extends {lastActivity: string; totalCost: number; totalTokens: number}>(items: T[], field: SortField) {
+  return [...items].sort((left, right) => {
+    if (field === "lastActivity") {
+      return dateValue(right.lastActivity) - dateValue(left.lastActivity);
+    }
+    return (right[field] || 0) - (left[field] || 0);
+  });
+}
+
+function dateValue(value: string) {
+  const timestamp = new Date(value).getTime();
+  return Number.isNaN(timestamp) ? 0 : timestamp;
 }
 
 function formatCost(value: number, noCost: boolean) {

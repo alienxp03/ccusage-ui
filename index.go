@@ -89,6 +89,9 @@ type IndexedSession struct {
 	ActiveDurationSeconds int64            `json:"activeDurationSeconds"`
 	Originator            string           `json:"originator"`
 	ClientSource          string           `json:"clientSource"`
+	Model                 string           `json:"model"`
+	Provider              string           `json:"provider"`
+	ReasoningLevel        string           `json:"reasoningLevel"`
 }
 
 func (a *App) RefreshProjectIndex(req IndexRequest) (ProjectIndexResponse, error) {
@@ -325,6 +328,15 @@ func migrateIndexDB(db *sql.DB) error {
 	if err := ensureColumn(db, "project_sessions", "client_source", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
+	if err := ensureColumn(db, "project_sessions", "model", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := ensureColumn(db, "project_sessions", "provider", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := ensureColumn(db, "project_sessions", "reasoning_level", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -380,8 +392,8 @@ func replaceIndexedSessions(db *sql.DB, rows []ReportRow, indexedAt string) erro
 	insertSession, err := tx.Prepare(`INSERT INTO project_sessions (
 		session_key, session_id, agent, project_path, project_name, logical_project_path, logical_project_name, grouping_rule, last_activity,
 		input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
-		total_tokens, total_cost, models_json, raw_json, indexed_at, originator, client_source
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+		total_tokens, total_cost, models_json, raw_json, indexed_at, originator, client_source, model, provider, reasoning_level
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return err
 	}
@@ -415,6 +427,9 @@ func replaceIndexedSessions(db *sql.DB, rows []ReportRow, indexedAt string) erro
 		}
 		originator := firstNonEmptyString(metadataString(row.Metadata, "originator"), transcriptMetadata.Originator)
 		clientSource := firstNonEmptyString(metadataString(row.Metadata, "source"), transcriptMetadata.Source)
+		model := firstNonEmptyString(metadataString(row.Metadata, "model"), transcriptMetadata.Model)
+		provider := firstNonEmptyString(metadataString(row.Metadata, "provider"), transcriptMetadata.Provider)
+		reasoningLevel := firstNonEmptyString(metadataString(row.Metadata, "reasoningLevel"), transcriptMetadata.ReasoningLevel)
 		physicalProjectName := projectName(projectPath)
 		grouped := groupProjectPath(projectPath, groupingRules)
 		logicalProjectPath := grouped.LogicalPath
@@ -451,6 +466,9 @@ func replaceIndexedSessions(db *sql.DB, rows []ReportRow, indexedAt string) erro
 			indexedAt,
 			originator,
 			clientSource,
+			model,
+			provider,
+			reasoningLevel,
 		); err != nil {
 			return err
 		}
@@ -651,14 +669,11 @@ func readAllProjectSessions(db *sql.DB) (map[string][]IndexedSession, error) {
 		message_source_path,
 		active_duration_seconds,
 		originator,
-		client_source
-	FROM (
-		SELECT
-			ps.*,
-			ROW_NUMBER() OVER (PARTITION BY logical_project_path ORDER BY last_activity DESC) AS row_number
-		FROM project_sessions ps
-	)
-	WHERE row_number <= 12
+		client_source,
+		model,
+		provider,
+		reasoning_level
+	FROM project_sessions
 	ORDER BY logical_project_path, last_activity DESC`)
 	if err != nil {
 		return nil, err
@@ -690,6 +705,9 @@ func readAllProjectSessions(db *sql.DB) (map[string][]IndexedSession, error) {
 			&session.ActiveDurationSeconds,
 			&session.Originator,
 			&session.ClientSource,
+			&session.Model,
+			&session.Provider,
+			&session.ReasoningLevel,
 		); err != nil {
 			return nil, err
 		}
@@ -794,7 +812,10 @@ func readProjectSessions(db *sql.DB, projectPath string) ([]IndexedSession, erro
 		message_source_path,
 		active_duration_seconds,
 		originator,
-		client_source
+		client_source,
+		model,
+		provider,
+		reasoning_level
 	FROM project_sessions
 	WHERE project_path = ?
 	ORDER BY last_activity DESC
@@ -827,6 +848,9 @@ func readProjectSessions(db *sql.DB, projectPath string) ([]IndexedSession, erro
 			&session.ActiveDurationSeconds,
 			&session.Originator,
 			&session.ClientSource,
+			&session.Model,
+			&session.Provider,
+			&session.ReasoningLevel,
 		); err != nil {
 			return nil, err
 		}

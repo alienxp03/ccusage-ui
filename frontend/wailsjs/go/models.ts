@@ -215,6 +215,9 @@ export namespace main {
 	    activeDurationSeconds: number;
 	    originator: string;
 	    clientSource: string;
+	    model: string;
+	    provider: string;
+	    reasoningLevel: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new IndexedSession(source);
@@ -240,6 +243,9 @@ export namespace main {
 	        this.activeDurationSeconds = source["activeDurationSeconds"];
 	        this.originator = source["originator"];
 	        this.clientSource = source["clientSource"];
+	        this.model = source["model"];
+	        this.provider = source["provider"];
+	        this.reasoningLevel = source["reasoningLevel"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -512,6 +518,9 @@ export namespace main {
 	    activeDurationSeconds: number;
 	    originator: string;
 	    clientSource: string;
+	    model: string;
+	    provider: string;
+	    reasoningLevel: string;
 	    messages: ConversationMessage[];
 	    supported: boolean;
 	    unavailableHint: string;
@@ -529,6 +538,9 @@ export namespace main {
 	        this.activeDurationSeconds = source["activeDurationSeconds"];
 	        this.originator = source["originator"];
 	        this.clientSource = source["clientSource"];
+	        this.model = source["model"];
+	        this.provider = source["provider"];
+	        this.reasoningLevel = source["reasoningLevel"];
 	        this.messages = this.convertValues(source["messages"], ConversationMessage);
 	        this.supported = source["supported"];
 	        this.unavailableHint = source["unavailableHint"];
@@ -577,6 +589,9 @@ export namespace main {
 	    activeDurationSeconds: number;
 	    originator: string;
 	    clientSource: string;
+	    model: string;
+	    provider: string;
+	    reasoningLevel: string;
 	    cached: boolean;
 	    supported: boolean;
 	    unavailableHint: string;
@@ -595,6 +610,9 @@ export namespace main {
 	        this.activeDurationSeconds = source["activeDurationSeconds"];
 	        this.originator = source["originator"];
 	        this.clientSource = source["clientSource"];
+	        this.model = source["model"];
+	        this.provider = source["provider"];
+	        this.reasoningLevel = source["reasoningLevel"];
 	        this.cached = source["cached"];
 	        this.supported = source["supported"];
 	        this.unavailableHint = source["unavailableHint"];

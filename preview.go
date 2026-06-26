@@ -28,6 +28,9 @@ type SessionPreviewResponse struct {
 	ActiveDurationSeconds int64  `json:"activeDurationSeconds"`
 	Originator            string `json:"originator"`
 	ClientSource          string `json:"clientSource"`
+	Model                 string `json:"model"`
+	Provider              string `json:"provider"`
+	ReasoningLevel        string `json:"reasoningLevel"`
 	Cached                bool   `json:"cached"`
 	Supported             bool   `json:"supported"`
 	UnavailableHint       string `json:"unavailableHint"`
@@ -41,6 +44,9 @@ type SessionConversationResponse struct {
 	ActiveDurationSeconds int64                 `json:"activeDurationSeconds"`
 	Originator            string                `json:"originator"`
 	ClientSource          string                `json:"clientSource"`
+	Model                 string                `json:"model"`
+	Provider              string                `json:"provider"`
+	ReasoningLevel        string                `json:"reasoningLevel"`
 	Messages              []ConversationMessage `json:"messages"`
 	Supported             bool                  `json:"supported"`
 	UnavailableHint       string                `json:"unavailableHint"`
@@ -53,9 +59,12 @@ type ConversationMessage struct {
 }
 
 type TranscriptMetadata struct {
-	CWD        string
-	Originator string
-	Source     string
+	CWD            string
+	Originator     string
+	Source         string
+	Model          string
+	Provider       string
+	ReasoningLevel string
 }
 
 func (a *App) GetSessionConversation(req SessionPreviewRequest) (SessionConversationResponse, error) {
@@ -76,6 +85,9 @@ func (a *App) GetSessionConversation(req SessionPreviewRequest) (SessionConversa
 	transcriptMetadata := extractTranscriptMetadata(sourcePath)
 	response.Originator = transcriptMetadata.Originator
 	response.ClientSource = transcriptMetadata.Source
+	response.Model = transcriptMetadata.Model
+	response.Provider = transcriptMetadata.Provider
+	response.ReasoningLevel = transcriptMetadata.ReasoningLevel
 	messages, err := extractConversationMessages(sourcePath)
 	response.SourcePath = sourcePath
 	if err != nil {
@@ -84,7 +96,7 @@ func (a *App) GetSessionConversation(req SessionPreviewRequest) (SessionConversa
 	}
 	response.Messages = messages
 	response.ActiveDurationSeconds = activeDurationSeconds(messages)
-	_ = writeCachedSessionTiming(sessionKey(req.Agent, req.SessionID), response.ActiveDurationSeconds, response.Originator, response.ClientSource)
+	_ = writeCachedSessionTiming(sessionKey(req.Agent, req.SessionID), response.ActiveDurationSeconds, transcriptMetadata)
 	return response, nil
 }
 
@@ -138,6 +150,9 @@ func (a *App) GetSessionPreview(req SessionPreviewRequest) (SessionPreviewRespon
 	response.ActiveDurationSeconds = activeDurationSeconds(messages)
 	response.Originator = transcriptMetadata.Originator
 	response.ClientSource = transcriptMetadata.Source
+	response.Model = transcriptMetadata.Model
+	response.Provider = transcriptMetadata.Provider
+	response.ReasoningLevel = transcriptMetadata.ReasoningLevel
 	if err := writeCachedSessionPreview(db, sessionKey, response); err != nil {
 		return response, err
 	}
@@ -153,9 +168,12 @@ func readCachedSessionPreview(db *sql.DB, sessionKey string) (SessionPreviewResp
 		message_source_path,
 		active_duration_seconds,
 		originator,
-		client_source
+		client_source,
+		model,
+		provider,
+		reasoning_level
 	FROM project_sessions
-	WHERE session_key = ?`, sessionKey).Scan(&response.Preview, &response.Timestamp, &response.SourcePath, &response.ActiveDurationSeconds, &response.Originator, &response.ClientSource)
+	WHERE session_key = ?`, sessionKey).Scan(&response.Preview, &response.Timestamp, &response.SourcePath, &response.ActiveDurationSeconds, &response.Originator, &response.ClientSource, &response.Model, &response.Provider, &response.ReasoningLevel)
 	if errors.Is(err, sql.ErrNoRows) {
 		return response, false, nil
 	}
@@ -167,12 +185,12 @@ func readCachedSessionPreview(db *sql.DB, sessionKey string) (SessionPreviewResp
 
 func writeCachedSessionPreview(db *sql.DB, sessionKey string, response SessionPreviewResponse) error {
 	_, err := db.Exec(`UPDATE project_sessions
-	SET last_user_message_preview = ?, last_user_message_at = ?, message_source_path = ?, active_duration_seconds = ?, originator = ?, client_source = ?
-	WHERE session_key = ?`, response.Preview, response.Timestamp, response.SourcePath, response.ActiveDurationSeconds, response.Originator, response.ClientSource, sessionKey)
+	SET last_user_message_preview = ?, last_user_message_at = ?, message_source_path = ?, active_duration_seconds = ?, originator = ?, client_source = ?, model = ?, provider = ?, reasoning_level = ?
+	WHERE session_key = ?`, response.Preview, response.Timestamp, response.SourcePath, response.ActiveDurationSeconds, response.Originator, response.ClientSource, response.Model, response.Provider, response.ReasoningLevel, sessionKey)
 	return err
 }
 
-func writeCachedSessionTiming(sessionKey string, activeDurationSeconds int64, originator string, clientSource string) error {
+func writeCachedSessionTiming(sessionKey string, activeDurationSeconds int64, metadata TranscriptMetadata) error {
 	db, _, err := openIndexDB()
 	if err != nil {
 		return err
@@ -181,7 +199,7 @@ func writeCachedSessionTiming(sessionKey string, activeDurationSeconds int64, or
 	if err := migrateIndexDB(db); err != nil {
 		return err
 	}
-	_, err = db.Exec(`UPDATE project_sessions SET active_duration_seconds = ?, originator = ?, client_source = ? WHERE session_key = ?`, activeDurationSeconds, originator, clientSource, sessionKey)
+	_, err = db.Exec(`UPDATE project_sessions SET active_duration_seconds = ?, originator = ?, client_source = ?, model = ?, provider = ?, reasoning_level = ? WHERE session_key = ?`, activeDurationSeconds, metadata.Originator, metadata.Source, metadata.Model, metadata.Provider, metadata.ReasoningLevel, sessionKey)
 	return err
 }
 
@@ -298,12 +316,27 @@ func extractTranscriptMetadata(path string) TranscriptMetadata {
 		metadata.CWD = firstNonEmptyString(metadata.CWD, stringValue(payload["cwd"]))
 		metadata.Originator = firstNonEmptyString(metadata.Originator, stringValue(payload["originator"]))
 		metadata.Source = firstNonEmptyString(metadata.Source, stringValue(payload["source"]))
+		if payload["type"] == "model_change" {
+			metadata.Provider = firstNonEmptyString(metadata.Provider, stringValue(payload["provider"]))
+			metadata.Model = firstNonEmptyString(metadata.Model, stringValue(payload["modelId"]))
+		}
+		if payload["type"] == "thinking_level_change" {
+			metadata.ReasoningLevel = firstNonEmptyString(metadata.ReasoningLevel, stringValue(payload["thinkingLevel"]))
+		}
 		if nested, ok := payload["payload"].(map[string]any); ok {
 			metadata.CWD = firstNonEmptyString(metadata.CWD, stringValue(nested["cwd"]))
 			metadata.Originator = firstNonEmptyString(metadata.Originator, stringValue(nested["originator"]))
 			metadata.Source = firstNonEmptyString(metadata.Source, stringValue(nested["source"]))
+			metadata.Provider = firstNonEmptyString(metadata.Provider, stringValue(nested["model_provider"]))
+			metadata.Model = firstNonEmptyString(metadata.Model, stringValue(nested["model"]))
+			if collaborationMode, ok := nested["collaboration_mode"].(map[string]any); ok {
+				if settings, ok := collaborationMode["settings"].(map[string]any); ok {
+					metadata.Model = firstNonEmptyString(metadata.Model, stringValue(settings["model"]))
+					metadata.ReasoningLevel = firstNonEmptyString(metadata.ReasoningLevel, stringValue(settings["reasoning_effort"]))
+				}
+			}
 		}
-		if metadata.CWD != "" && metadata.Originator != "" && metadata.Source != "" {
+		if metadata.CWD != "" && metadata.Originator != "" && metadata.Source != "" && metadata.Model != "" && metadata.ReasoningLevel != "" {
 			return metadata
 		}
 	}
