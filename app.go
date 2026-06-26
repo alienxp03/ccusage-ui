@@ -245,6 +245,30 @@ func extractJSONObject(output []byte) ([]byte, error) {
 	return output[start : end+1], nil
 }
 
+func rawString(raw map[string]any, key string) string {
+	value, ok := raw[key]
+	if !ok {
+		return ""
+	}
+	text, ok := value.(string)
+	if !ok {
+		return ""
+	}
+	return text
+}
+
+func rawFloat(raw map[string]any, key string) float64 {
+	value, ok := raw[key]
+	if !ok {
+		return 0
+	}
+	number, ok := value.(float64)
+	if !ok {
+		return 0
+	}
+	return number
+}
+
 func normalizeReport(report string, data []byte) ([]ReportRow, map[string]any, error) {
 	var payload map[string]json.RawMessage
 	if err := json.Unmarshal(data, &payload); err != nil {
@@ -279,18 +303,36 @@ func normalizeReport(report string, data []byte) ([]ReportRow, map[string]any, e
 		if index < len(rawMaps) {
 			raw = rawMaps[index]
 		}
+		period := row.Period
+		if period == "" {
+			period = rawString(raw, "sessionId")
+		}
+		metadata := row.Metadata
+		if metadata == nil {
+			metadata = map[string]any{}
+		}
+		if metadataString(metadata, "lastActivity") == "" {
+			if lastActivity := rawString(raw, "lastActivity"); lastActivity != "" {
+				metadata["lastActivity"] = lastActivity
+			}
+		}
+		totalCost := row.TotalCost
+		if totalCost == 0 {
+			totalCost = rawFloat(raw, "costUSD")
+		}
+
 		rows = append(rows, ReportRow{
-			Period:              row.Period,
+			Period:              period,
 			Agent:               row.Agent,
 			InputTokens:         row.InputTokens,
 			OutputTokens:        row.OutputTokens,
 			CacheCreationTokens: row.CacheCreationTokens,
 			CacheReadTokens:     row.CacheReadTokens,
 			TotalTokens:         row.TotalTokens,
-			TotalCost:           row.TotalCost,
+			TotalCost:           totalCost,
 			ModelsUsed:          row.ModelsUsed,
 			ModelBreakdowns:     row.ModelBreakdowns,
-			Metadata:            row.Metadata,
+			Metadata:            metadata,
 			Raw:                 raw,
 		})
 	}

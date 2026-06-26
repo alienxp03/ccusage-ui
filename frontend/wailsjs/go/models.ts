@@ -213,6 +213,8 @@ export namespace main {
 	    lastUserMessageAt: string;
 	    messageSourcePath: string;
 	    activeDurationSeconds: number;
+	    originator: string;
+	    clientSource: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new IndexedSession(source);
@@ -236,6 +238,8 @@ export namespace main {
 	        this.lastUserMessageAt = source["lastUserMessageAt"];
 	        this.messageSourcePath = source["messageSourcePath"];
 	        this.activeDurationSeconds = source["activeDurationSeconds"];
+	        this.originator = source["originator"];
+	        this.clientSource = source["clientSource"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -506,6 +510,8 @@ export namespace main {
 	    projectPath: string;
 	    sourcePath: string;
 	    activeDurationSeconds: number;
+	    originator: string;
+	    clientSource: string;
 	    messages: ConversationMessage[];
 	    supported: boolean;
 	    unavailableHint: string;
@@ -521,6 +527,8 @@ export namespace main {
 	        this.projectPath = source["projectPath"];
 	        this.sourcePath = source["sourcePath"];
 	        this.activeDurationSeconds = source["activeDurationSeconds"];
+	        this.originator = source["originator"];
+	        this.clientSource = source["clientSource"];
 	        this.messages = this.convertValues(source["messages"], ConversationMessage);
 	        this.supported = source["supported"];
 	        this.unavailableHint = source["unavailableHint"];
@@ -567,6 +575,8 @@ export namespace main {
 	    timestamp: string;
 	    sourcePath: string;
 	    activeDurationSeconds: number;
+	    originator: string;
+	    clientSource: string;
 	    cached: boolean;
 	    supported: boolean;
 	    unavailableHint: string;
@@ -583,6 +593,8 @@ export namespace main {
 	        this.timestamp = source["timestamp"];
 	        this.sourcePath = source["sourcePath"];
 	        this.activeDurationSeconds = source["activeDurationSeconds"];
+	        this.originator = source["originator"];
+	        this.clientSource = source["clientSource"];
 	        this.cached = source["cached"];
 	        this.supported = source["supported"];
 	        this.unavailableHint = source["unavailableHint"];

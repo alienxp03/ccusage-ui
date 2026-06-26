@@ -1,4 +1,4 @@
-import {type KeyboardEvent as ReactKeyboardEvent, useEffect, useMemo, useState} from "react";
+import {Fragment, type KeyboardEvent as ReactKeyboardEvent, useEffect, useMemo, useState} from "react";
 import {
   Activity,
   BarChart3,
@@ -110,6 +110,8 @@ type IndexedSession = {
   lastUserMessageAt: string;
   messageSourcePath: string;
   activeDurationSeconds: number;
+  originator: string;
+  clientSource: string;
 };
 
 type SessionPreviewResponse = {
@@ -119,6 +121,8 @@ type SessionPreviewResponse = {
   timestamp: string;
   sourcePath: string;
   activeDurationSeconds: number;
+  originator: string;
+  clientSource: string;
   cached: boolean;
   supported: boolean;
   unavailableHint: string;
@@ -136,6 +140,8 @@ type SessionConversationResponse = {
   projectPath: string;
   sourcePath: string;
   activeDurationSeconds: number;
+  originator: string;
+  clientSource: string;
   messages: ConversationMessage[] | null;
   supported: boolean;
   unavailableHint: string;
@@ -459,6 +465,8 @@ function App() {
           timestamp: current[sessionPreviewKey(session)]?.timestamp ?? session.lastUserMessageAt ?? "",
           sourcePath: typed.sourcePath || current[sessionPreviewKey(session)]?.sourcePath || session.messageSourcePath || "",
           activeDurationSeconds: typed.activeDurationSeconds,
+          originator: typed.originator,
+          clientSource: typed.clientSource,
           cached: true,
           supported: typed.supported,
           unavailableHint: typed.unavailableHint,
@@ -989,7 +997,7 @@ function ConversationModal({
               Conversation
             </div>
             <div className="mt-1 truncate text-xs text-app-muted">
-              {session.agent} · {shortSessionId(session.sessionId)} · Duration {formatDuration(conversation?.activeDurationSeconds || session.activeDurationSeconds)} · {cleanProjectPath(session.projectPath)}
+              {session.agent}{conversationClientLabel(conversation, session) ? ` · ${conversationClientLabel(conversation, session)}` : ""} · {shortSessionId(session.sessionId)} · Duration {formatDuration(conversation?.activeDurationSeconds || session.activeDurationSeconds)} · {cleanProjectPath(session.projectPath)}
             </div>
           </div>
           <div className="flex items-center gap-2">
@@ -1143,6 +1151,7 @@ function ProjectDetail({
         previewCache={previewCache}
         onPreviewLoaded={onPreviewLoaded}
         onOpenSession={onOpenSession}
+        onOpenPath={onOpenPath}
       />
 
       <div className="mt-6">
@@ -1291,13 +1300,22 @@ function RecentSessionsTable({
   previewCache,
   onPreviewLoaded,
   onOpenSession,
+  onOpenPath,
 }: {
   sessions: IndexedSession[];
   noCost: boolean;
   previewCache: Record<string, SessionPreviewResponse>;
   onPreviewLoaded: (session: IndexedSession, preview: SessionPreviewResponse) => void;
   onOpenSession: (session: IndexedSession) => void;
+  onOpenPath: (path: string) => void;
 }) {
+  const [expandedModels, setExpandedModels] = useState<Record<string, boolean>>({});
+
+  function toggleModels(session: IndexedSession) {
+    const key = sessionPreviewKey(session);
+    setExpandedModels((current) => ({...current, [key]: !current[key]}));
+  }
+
   return (
     <div className="mt-6">
       <h3 className="section-title">Recent Sessions</h3>
@@ -1305,9 +1323,11 @@ function RecentSessionsTable({
         <table className="w-full text-sm">
           <thead className="border-b border-app-line bg-app-panel text-xs text-app-muted">
             <tr>
-              <th className="table-head">Session</th>
               <th className="table-head">Agent</th>
               <th className="table-head">Last User Message</th>
+              <th className="table-head text-right">Input</th>
+              <th className="table-head text-right">Output</th>
+              <th className="table-head text-right">Cache</th>
               <th className="table-head text-right">Cost</th>
               <th className="table-head text-right">Duration</th>
               <th className="table-head text-right">Last activity</th>
@@ -1315,20 +1335,31 @@ function RecentSessionsTable({
             </tr>
           </thead>
           <tbody>
-            {sessions.map((session) => (
-              <tr key={`${session.agent}-${session.sessionId}`} className="border-b border-app-line/70 last:border-0">
-                <td className="table-cell max-w-[140px] truncate font-medium" title={session.sessionId}>
-                  {shortSessionId(session.sessionId)}
-                </td>
+            {sessions.map((session) => {
+              const key = sessionPreviewKey(session);
+              const sourcePath = previewCache[key]?.sourcePath || session.messageSourcePath;
+              const models = session.modelBreakdowns ?? [];
+              const modelsExpanded = expandedModels[key];
+              return (
+              <Fragment key={`${session.agent}-${session.sessionId}`}>
+              <tr className="border-b border-app-line/70 last:border-0">
                 <td className="table-cell">
-                  <AgentNameChips agents={[session.agent]} />
+                  <SessionAgentCell session={session} cachedPreview={previewCache[sessionPreviewKey(session)]} />
                 </td>
-                <td className="table-cell max-w-[360px]">
+                <td className="table-cell max-w-[360px]" title={session.sessionId}>
                   <SessionPreviewText
                     session={session}
                     cachedPreview={previewCache[sessionPreviewKey(session)]}
                     onPreviewLoaded={(preview) => onPreviewLoaded(session, preview)}
                   />
+                </td>
+                <td className="table-cell text-right text-app-muted">{formatTokens(session.inputTokens)}</td>
+                <td className="table-cell text-right text-app-muted">{formatTokens(session.outputTokens)}</td>
+                <td
+                  className="table-cell text-right text-app-muted"
+                  title={`Read: ${formatTokens(session.cacheReadTokens)} · Create: ${formatTokens(session.cacheCreationTokens)}`}
+                >
+                  {formatTokens(session.cacheReadTokens + session.cacheCreationTokens)}
                 </td>
                 <td className="table-cell text-right">{formatCost(session.totalCost, noCost)}</td>
                 <td className="table-cell text-right text-app-muted">
@@ -1336,15 +1367,34 @@ function RecentSessionsTable({
                 </td>
                 <td className="table-cell text-right text-app-muted">{formatDateTime(session.lastActivity)}</td>
                 <td className="table-cell text-right">
-                  <button className="icon-button ml-auto h-7 w-7" title="View conversation" onClick={() => onOpenSession(session)}>
-                    <MessageSquare size={13} />
-                  </button>
+                  <div className="flex justify-end gap-1.5">
+                    {models.length > 1 ? (
+                      <button
+                        className={["button h-7 px-2 text-xs", modelsExpanded ? "bg-app-accentSoft" : ""].join(" ")}
+                        title="Show model breakdown"
+                        onClick={() => toggleModels(session)}
+                      >
+                        Models
+                      </button>
+                    ) : null}
+                    {sourcePath ? (
+                      <button className="icon-button h-7 w-7" title="Reveal transcript in Finder" onClick={() => onOpenPath(sourcePath)}>
+                        <FolderOpen size={13} />
+                      </button>
+                    ) : null}
+                    <button className="icon-button h-7 w-7" title="View conversation" onClick={() => onOpenSession(session)}>
+                      <MessageSquare size={13} />
+                    </button>
+                  </div>
                 </td>
               </tr>
-            ))}
+              {modelsExpanded ? <SessionModelBreakdownRow models={models} noCost={noCost} /> : null}
+              </Fragment>
+            );
+            })}
             {sessions.length === 0 ? (
               <tr>
-                <td className="table-cell text-app-muted" colSpan={7}>
+                <td className="table-cell text-app-muted" colSpan={9}>
                   No indexed sessions available.
                 </td>
               </tr>
@@ -1352,6 +1402,56 @@ function RecentSessionsTable({
           </tbody>
         </table>
       </div>
+    </div>
+  );
+}
+
+function SessionModelBreakdownRow({models, noCost}: {models: ModelBreakdown[]; noCost: boolean}) {
+  return (
+    <tr className="border-b border-app-line/70 bg-app-bg/40">
+      <td className="table-cell" colSpan={9}>
+        <div className="rounded-md border border-app-line bg-app-surface">
+          <table className="w-full text-xs">
+            <thead className="border-b border-app-line bg-app-panel text-app-muted">
+              <tr>
+                <th className="table-head">Model</th>
+                <th className="table-head text-right">Input</th>
+                <th className="table-head text-right">Output</th>
+                <th className="table-head text-right">Cache</th>
+                <th className="table-head text-right">Cost</th>
+              </tr>
+            </thead>
+            <tbody>
+              {models.map((model) => (
+                <tr key={model.modelName} className="border-b border-app-line/60 last:border-0">
+                  <td className="table-cell font-medium">{model.modelName}</td>
+                  <td className="table-cell text-right text-app-muted">{formatTokens(model.inputTokens)}</td>
+                  <td className="table-cell text-right text-app-muted">{formatTokens(model.outputTokens)}</td>
+                  <td
+                    className="table-cell text-right text-app-muted"
+                    title={`Read: ${formatTokens(model.cacheReadTokens)} · Create: ${formatTokens(model.cacheCreationTokens)}`}
+                  >
+                    {formatTokens(model.cacheReadTokens + model.cacheCreationTokens)}
+                  </td>
+                  <td className="table-cell text-right">{formatCost(model.cost, noCost)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </td>
+    </tr>
+  );
+}
+
+function SessionAgentCell({session, cachedPreview}: {session: IndexedSession; cachedPreview?: SessionPreviewResponse}) {
+  const originator = cachedPreview?.originator || session.originator;
+  const clientSource = cachedPreview?.clientSource || session.clientSource;
+  const client = [originator, clientSource].filter(Boolean).join(" · ");
+  return (
+    <div className="space-y-1">
+      <AgentNameChips agents={[session.agent]} />
+      {client ? <div className="text-[11px] leading-4 text-app-muted">{client}</div> : null}
     </div>
   );
 }
@@ -1420,15 +1520,7 @@ function SessionPreviewText({
   return (
     <span className="flex items-start gap-2">
       <span className="line-clamp-2 min-w-0 flex-1 text-xs text-app-muted">{loading ? "Loading..." : preview}</span>
-      {sourcePath ? (
-        <button
-          className="icon-button h-7 w-7 shrink-0"
-          title="Reveal transcript in Finder"
-          onClick={() => void OpenPathInFinder(sourcePath)}
-        >
-          <FolderOpen size={13} />
-        </button>
-      ) : null}
+
     </span>
   );
 }
@@ -1534,6 +1626,12 @@ function shortSessionId(value: string) {
 
 function sessionPreviewKey(session: Pick<IndexedSession, "agent" | "sessionId">) {
   return `${session.agent || "all"}:${session.sessionId}`;
+}
+
+function conversationClientLabel(conversation: SessionConversationResponse | null, session: IndexedSession) {
+  return [conversation?.originator || session.originator, conversation?.clientSource || session.clientSource]
+    .filter(Boolean)
+    .join(" · ");
 }
 
 function modelLabel(row: ReportRow) {

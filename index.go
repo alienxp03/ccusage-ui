@@ -87,6 +87,8 @@ type IndexedSession struct {
 	LastUserMessageAt     string           `json:"lastUserMessageAt"`
 	MessageSourcePath     string           `json:"messageSourcePath"`
 	ActiveDurationSeconds int64            `json:"activeDurationSeconds"`
+	Originator            string           `json:"originator"`
+	ClientSource          string           `json:"clientSource"`
 }
 
 func (a *App) RefreshProjectIndex(req IndexRequest) (ProjectIndexResponse, error) {
@@ -202,6 +204,13 @@ func (a *App) loadSessionRows(req IndexRequest) ([]ReportRow, RunnerInfo, []stri
 	if err != nil {
 		return nil, RunnerInfo{}, nil, err
 	}
+	if source != "all" {
+		for index := range rows {
+			if rows[index].Agent == "" {
+				rows[index].Agent = source
+			}
+		}
+	}
 
 	return rows, runner, append([]string{runner.Path}, args...), nil
 }
@@ -310,6 +319,12 @@ func migrateIndexDB(db *sql.DB) error {
 	if err := ensureColumn(db, "project_sessions", "active_duration_seconds", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
+	if err := ensureColumn(db, "project_sessions", "originator", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := ensureColumn(db, "project_sessions", "client_source", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -365,8 +380,8 @@ func replaceIndexedSessions(db *sql.DB, rows []ReportRow, indexedAt string) erro
 	insertSession, err := tx.Prepare(`INSERT INTO project_sessions (
 		session_key, session_id, agent, project_path, project_name, logical_project_path, logical_project_name, grouping_rule, last_activity,
 		input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
-		total_tokens, total_cost, models_json, raw_json, indexed_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+		total_tokens, total_cost, models_json, raw_json, indexed_at, originator, client_source
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return err
 	}
@@ -388,9 +403,18 @@ func replaceIndexedSessions(db *sql.DB, rows []ReportRow, indexedAt string) erro
 		}
 		sessionKey := agent + ":" + sessionID
 		projectPath := metadataString(row.Metadata, "projectPath")
+		transcriptMetadata := TranscriptMetadata{}
+		if projectPath == "" || agent == "codex" {
+			transcriptMetadata = inferTranscriptMetadata(row)
+		}
+		if projectPath == "" {
+			projectPath = transcriptMetadata.CWD
+		}
 		if projectPath == "" {
 			projectPath = "(unknown)"
 		}
+		originator := firstNonEmptyString(metadataString(row.Metadata, "originator"), transcriptMetadata.Originator)
+		clientSource := firstNonEmptyString(metadataString(row.Metadata, "source"), transcriptMetadata.Source)
 		physicalProjectName := projectName(projectPath)
 		grouped := groupProjectPath(projectPath, groupingRules)
 		logicalProjectPath := grouped.LogicalPath
@@ -425,6 +449,8 @@ func replaceIndexedSessions(db *sql.DB, rows []ReportRow, indexedAt string) erro
 			string(modelsJSON),
 			string(rawJSON),
 			indexedAt,
+			originator,
+			clientSource,
 		); err != nil {
 			return err
 		}
@@ -601,7 +627,13 @@ func readAllProjectModels(db *sql.DB) (map[string][]ModelBreakdown, error) {
 }
 
 func readAllProjectSessions(db *sql.DB) (map[string][]IndexedSession, error) {
+	modelsBySession, err := readAllSessionModels(db)
+	if err != nil {
+		return nil, err
+	}
+
 	rows, err := db.Query(`SELECT
+		session_key,
 		session_id,
 		agent,
 		project_path,
@@ -617,7 +649,9 @@ func readAllProjectSessions(db *sql.DB) (map[string][]IndexedSession, error) {
 		last_user_message_preview,
 		last_user_message_at,
 		message_source_path,
-		active_duration_seconds
+		active_duration_seconds,
+		originator,
+		client_source
 	FROM (
 		SELECT
 			ps.*,
@@ -634,8 +668,10 @@ func readAllProjectSessions(db *sql.DB) (map[string][]IndexedSession, error) {
 	sessionsByProject := map[string][]IndexedSession{}
 	for rows.Next() {
 		logicalProjectPath := ""
+		sessionKey := ""
 		session := IndexedSession{}
 		if err := rows.Scan(
+			&sessionKey,
 			&session.SessionID,
 			&session.Agent,
 			&session.ProjectPath,
@@ -652,9 +688,12 @@ func readAllProjectSessions(db *sql.DB) (map[string][]IndexedSession, error) {
 			&session.LastUserMessageAt,
 			&session.MessageSourcePath,
 			&session.ActiveDurationSeconds,
+			&session.Originator,
+			&session.ClientSource,
 		); err != nil {
 			return nil, err
 		}
+		session.ModelBreakdowns = modelsBySession[sessionKey]
 		sessionsByProject[logicalProjectPath] = append(sessionsByProject[logicalProjectPath], session)
 	}
 	return sessionsByProject, rows.Err()
@@ -680,6 +719,42 @@ func readAllProjectPhysicalPaths(db *sql.DB) (map[string][]string, error) {
 		pathsByProject[logicalProjectPath] = append(pathsByProject[logicalProjectPath], decodeProjectPathForGrouping(physicalPath))
 	}
 	return pathsByProject, rows.Err()
+}
+
+func readAllSessionModels(db *sql.DB) (map[string][]ModelBreakdown, error) {
+	rows, err := db.Query(`SELECT
+		session_key,
+		model_name,
+		input_tokens,
+		output_tokens,
+		cache_creation_tokens,
+		cache_read_tokens,
+		cost
+	FROM session_models
+	ORDER BY session_key, cost DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	modelsBySession := map[string][]ModelBreakdown{}
+	for rows.Next() {
+		sessionKey := ""
+		model := ModelBreakdown{}
+		if err := rows.Scan(
+			&sessionKey,
+			&model.ModelName,
+			&model.InputTokens,
+			&model.OutputTokens,
+			&model.CacheCreationTokens,
+			&model.CacheReadTokens,
+			&model.Cost,
+		); err != nil {
+			return nil, err
+		}
+		modelsBySession[sessionKey] = append(modelsBySession[sessionKey], model)
+	}
+	return modelsBySession, rows.Err()
 }
 
 func readProjectAgents(db *sql.DB, projectPath string) ([]string, error) {
@@ -717,7 +792,9 @@ func readProjectSessions(db *sql.DB, projectPath string) ([]IndexedSession, erro
 		last_user_message_preview,
 		last_user_message_at,
 		message_source_path,
-		active_duration_seconds
+		active_duration_seconds,
+		originator,
+		client_source
 	FROM project_sessions
 	WHERE project_path = ?
 	ORDER BY last_activity DESC
@@ -748,6 +825,8 @@ func readProjectSessions(db *sql.DB, projectPath string) ([]IndexedSession, erro
 			&session.LastUserMessageAt,
 			&session.MessageSourcePath,
 			&session.ActiveDurationSeconds,
+			&session.Originator,
+			&session.ClientSource,
 		); err != nil {
 			return nil, err
 		}
@@ -1012,6 +1091,27 @@ func scanModelBreakdowns(rows *sql.Rows) ([]ModelBreakdown, error) {
 		models = append(models, model)
 	}
 	return models, rows.Err()
+}
+
+func inferTranscriptMetadata(row ReportRow) TranscriptMetadata {
+	agent := row.Agent
+	if agent == "" {
+		if strings.Contains(row.Period, "rollout-") {
+			agent = "codex"
+		}
+	}
+	if agent == "" || row.Period == "" {
+		return TranscriptMetadata{}
+	}
+	sourcePath, err := locateTranscript(agent, row.Period, "")
+	if err != nil {
+		return TranscriptMetadata{}
+	}
+	return extractTranscriptMetadata(sourcePath)
+}
+
+func inferProjectPathFromTranscript(row ReportRow) string {
+	return inferTranscriptMetadata(row).CWD
 }
 
 func (a *App) OpenProjectInFinder(projectPath string) error {

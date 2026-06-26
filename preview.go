@@ -26,6 +26,8 @@ type SessionPreviewResponse struct {
 	Timestamp             string `json:"timestamp"`
 	SourcePath            string `json:"sourcePath"`
 	ActiveDurationSeconds int64  `json:"activeDurationSeconds"`
+	Originator            string `json:"originator"`
+	ClientSource          string `json:"clientSource"`
 	Cached                bool   `json:"cached"`
 	Supported             bool   `json:"supported"`
 	UnavailableHint       string `json:"unavailableHint"`
@@ -37,6 +39,8 @@ type SessionConversationResponse struct {
 	ProjectPath           string                `json:"projectPath"`
 	SourcePath            string                `json:"sourcePath"`
 	ActiveDurationSeconds int64                 `json:"activeDurationSeconds"`
+	Originator            string                `json:"originator"`
+	ClientSource          string                `json:"clientSource"`
 	Messages              []ConversationMessage `json:"messages"`
 	Supported             bool                  `json:"supported"`
 	UnavailableHint       string                `json:"unavailableHint"`
@@ -46,6 +50,12 @@ type ConversationMessage struct {
 	Role      string `json:"role"`
 	Timestamp string `json:"timestamp"`
 	Text      string `json:"text"`
+}
+
+type TranscriptMetadata struct {
+	CWD        string
+	Originator string
+	Source     string
 }
 
 func (a *App) GetSessionConversation(req SessionPreviewRequest) (SessionConversationResponse, error) {
@@ -63,6 +73,9 @@ func (a *App) GetSessionConversation(req SessionPreviewRequest) (SessionConversa
 		return response, nil
 	}
 
+	transcriptMetadata := extractTranscriptMetadata(sourcePath)
+	response.Originator = transcriptMetadata.Originator
+	response.ClientSource = transcriptMetadata.Source
 	messages, err := extractConversationMessages(sourcePath)
 	response.SourcePath = sourcePath
 	if err != nil {
@@ -71,7 +84,7 @@ func (a *App) GetSessionConversation(req SessionPreviewRequest) (SessionConversa
 	}
 	response.Messages = messages
 	response.ActiveDurationSeconds = activeDurationSeconds(messages)
-	_ = writeCachedSessionTiming(sessionKey(req.Agent, req.SessionID), response.ActiveDurationSeconds)
+	_ = writeCachedSessionTiming(sessionKey(req.Agent, req.SessionID), response.ActiveDurationSeconds, response.Originator, response.ClientSource)
 	return response, nil
 }
 
@@ -117,11 +130,14 @@ func (a *App) GetSessionPreview(req SessionPreviewRequest) (SessionPreviewRespon
 		return response, nil
 	}
 
+	transcriptMetadata := extractTranscriptMetadata(sourcePath)
 	messages, _ := extractConversationMessages(sourcePath)
 	response.Preview = preview
 	response.Timestamp = timestamp
 	response.SourcePath = sourcePath
 	response.ActiveDurationSeconds = activeDurationSeconds(messages)
+	response.Originator = transcriptMetadata.Originator
+	response.ClientSource = transcriptMetadata.Source
 	if err := writeCachedSessionPreview(db, sessionKey, response); err != nil {
 		return response, err
 	}
@@ -135,9 +151,11 @@ func readCachedSessionPreview(db *sql.DB, sessionKey string) (SessionPreviewResp
 		last_user_message_preview,
 		last_user_message_at,
 		message_source_path,
-		active_duration_seconds
+		active_duration_seconds,
+		originator,
+		client_source
 	FROM project_sessions
-	WHERE session_key = ?`, sessionKey).Scan(&response.Preview, &response.Timestamp, &response.SourcePath, &response.ActiveDurationSeconds)
+	WHERE session_key = ?`, sessionKey).Scan(&response.Preview, &response.Timestamp, &response.SourcePath, &response.ActiveDurationSeconds, &response.Originator, &response.ClientSource)
 	if errors.Is(err, sql.ErrNoRows) {
 		return response, false, nil
 	}
@@ -149,12 +167,12 @@ func readCachedSessionPreview(db *sql.DB, sessionKey string) (SessionPreviewResp
 
 func writeCachedSessionPreview(db *sql.DB, sessionKey string, response SessionPreviewResponse) error {
 	_, err := db.Exec(`UPDATE project_sessions
-	SET last_user_message_preview = ?, last_user_message_at = ?, message_source_path = ?, active_duration_seconds = ?
-	WHERE session_key = ?`, response.Preview, response.Timestamp, response.SourcePath, response.ActiveDurationSeconds, sessionKey)
+	SET last_user_message_preview = ?, last_user_message_at = ?, message_source_path = ?, active_duration_seconds = ?, originator = ?, client_source = ?
+	WHERE session_key = ?`, response.Preview, response.Timestamp, response.SourcePath, response.ActiveDurationSeconds, response.Originator, response.ClientSource, sessionKey)
 	return err
 }
 
-func writeCachedSessionTiming(sessionKey string, activeDurationSeconds int64) error {
+func writeCachedSessionTiming(sessionKey string, activeDurationSeconds int64, originator string, clientSource string) error {
 	db, _, err := openIndexDB()
 	if err != nil {
 		return err
@@ -163,7 +181,7 @@ func writeCachedSessionTiming(sessionKey string, activeDurationSeconds int64) er
 	if err := migrateIndexDB(db); err != nil {
 		return err
 	}
-	_, err = db.Exec(`UPDATE project_sessions SET active_duration_seconds = ? WHERE session_key = ?`, activeDurationSeconds, sessionKey)
+	_, err = db.Exec(`UPDATE project_sessions SET active_duration_seconds = ?, originator = ?, client_source = ? WHERE session_key = ?`, activeDurationSeconds, originator, clientSource, sessionKey)
 	return err
 }
 
@@ -256,6 +274,40 @@ func findJSONLByName(root string, fragment string) (string, error) {
 func fileExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && !info.IsDir()
+}
+
+func extractTranscriptCWD(path string) string {
+	return extractTranscriptMetadata(path).CWD
+}
+
+func extractTranscriptMetadata(path string) TranscriptMetadata {
+	file, err := os.Open(path)
+	if err != nil {
+		return TranscriptMetadata{}
+	}
+	defer file.Close()
+
+	metadata := TranscriptMetadata{}
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 0, 1024*1024), 16*1024*1024)
+	for scanner.Scan() {
+		var payload map[string]any
+		if err := json.Unmarshal(scanner.Bytes(), &payload); err != nil {
+			continue
+		}
+		metadata.CWD = firstNonEmptyString(metadata.CWD, stringValue(payload["cwd"]))
+		metadata.Originator = firstNonEmptyString(metadata.Originator, stringValue(payload["originator"]))
+		metadata.Source = firstNonEmptyString(metadata.Source, stringValue(payload["source"]))
+		if nested, ok := payload["payload"].(map[string]any); ok {
+			metadata.CWD = firstNonEmptyString(metadata.CWD, stringValue(nested["cwd"]))
+			metadata.Originator = firstNonEmptyString(metadata.Originator, stringValue(nested["originator"]))
+			metadata.Source = firstNonEmptyString(metadata.Source, stringValue(nested["source"]))
+		}
+		if metadata.CWD != "" && metadata.Originator != "" && metadata.Source != "" {
+			return metadata
+		}
+	}
+	return metadata
 }
 
 func extractConversationMessages(path string) ([]ConversationMessage, error) {
