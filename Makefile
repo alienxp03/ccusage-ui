@@ -1,17 +1,30 @@
-.PHONY: run dev build test frontend-build
+.PHONY: setup run dev build test frontend-build destroy-db
+
+TOOLS := go@1.26.4 node@24 bun@1.3.14
+MISE := mise --no-config exec $(TOOLS) --
+WAILS := $(MISE) go run github.com/wailsapp/wails/v2/cmd/wails
+
+setup:
+	mise --no-config install --quiet $(TOOLS)
+	$(MISE) go mod download
+	$(MISE) bun install --cwd frontend
+	$(WAILS) version
 
 run:
-	wails build
+	$(WAILS) build
 	open build/bin/ccusage-ui.app
 
 dev:
-	wails dev -noreload
+	$(WAILS) dev -noreload
 
 build:
-	wails build
+	$(WAILS) build
 
 test:
-	go test ./...
+	$(MISE) go test ./...
 
 frontend-build:
-	cd frontend && bun run build
+	$(MISE) bun run --cwd frontend build
+
+destroy-db:
+	rm -f "$(HOME)/Library/Caches/ccusage-ui/usage-index.sqlite"*

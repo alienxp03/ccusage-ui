@@ -16,9 +16,10 @@ The app shows ccusage reports, indexes sessions locally for project views, suppo
 
 ## Requirements
 
-- Go, matching `go.mod`
-- Bun
-- Wails CLI
+- Mise (for `make setup`)
+- Go, matching `go.mod` (installed by `make setup`)
+- Bun (installed by `make setup`)
+- Wails CLI (provided by the project's Go module; no global install needed)
 - A ccusage runner. The app detects one in this order:
   1. `ccusage` on `PATH`
   2. `bunx ccusage`
@@ -29,17 +30,16 @@ The app shows ccusage reports, indexes sessions locally for project views, suppo
 Recommended local setup:
 
 ```bash
-mise install
-bun install --cwd frontend
-go install github.com/wailsapp/wails/v2/cmd/wails@latest
-bun install -g ccusage
+make setup
 ```
 
-If you do not install `ccusage` globally, the app can still fall back to `bunx`, `nix`, `npx`, or `pnpm` when available.
+Wails is run from the project's Go module with `go run`; it does not need to be installed globally.
+The app can run `ccusage` from `PATH`, or fall back to `bunx`, `nix`, `npx`, or `pnpm` when available.
 
 ## Development
 
 ```bash
+make setup
 make dev
 ```
 
@@ -59,17 +59,17 @@ To only build:
 make build
 ```
 
-or:
+or use the project-local Wails CLI directly:
 
 ```bash
-wails build
+go run github.com/wailsapp/wails/v2/cmd/wails build
 ```
 
 ## Tests
 
 ```bash
 go test ./...
-cd frontend && npm run build
+make frontend-build
 ```
 
 ## GitHub Actions macOS build
