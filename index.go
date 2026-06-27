@@ -12,10 +12,13 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
 )
+
+var indexDBMutex sync.Mutex
 
 type IndexRequest struct {
 	Source  string `json:"source"`
@@ -100,6 +103,9 @@ func (a *App) RefreshProjectIndex(req IndexRequest) (ProjectIndexResponse, error
 		return ProjectIndexResponse{}, err
 	}
 
+	indexDBMutex.Lock()
+	defer indexDBMutex.Unlock()
+
 	db, dbPath, err := openIndexDB()
 	if err != nil {
 		return ProjectIndexResponse{}, err
@@ -126,6 +132,9 @@ func (a *App) RefreshProjectIndex(req IndexRequest) (ProjectIndexResponse, error
 }
 
 func (a *App) GetProjectIndex() (ProjectIndexResponse, error) {
+	indexDBMutex.Lock()
+	defer indexDBMutex.Unlock()
+
 	db, dbPath, err := openIndexDB()
 	if err != nil {
 		return ProjectIndexResponse{}, err
@@ -416,7 +425,7 @@ func replaceIndexedSessions(db *sql.DB, rows []ReportRow, indexedAt string) erro
 		sessionKey := agent + ":" + sessionID
 		projectPath := metadataString(row.Metadata, "projectPath")
 		transcriptMetadata := TranscriptMetadata{}
-		if projectPath == "" || agent == "codex" {
+		if projectPath == "" || agent == "codex" || agent == "claude" || agent == "opencode" {
 			transcriptMetadata = inferTranscriptMetadata(row)
 		}
 		if projectPath == "" {

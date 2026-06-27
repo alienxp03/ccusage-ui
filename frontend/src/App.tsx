@@ -207,7 +207,24 @@ const reports: ReportDefinition[] = [
   {key: "settings", label: "Settings", description: "Configure project grouping", icon: Settings2},
 ];
 
-const sources = ["all", "codex", "pi"];
+const sources = [
+  "all",
+  "claude",
+  "codex",
+  "opencode",
+  "amp",
+  "droid",
+  "codebuff",
+  "hermes",
+  "pi",
+  "goose",
+  "kilo",
+  "copilot",
+  "gemini",
+  "kimi",
+  "qwen",
+  "openclaw",
+];
 
 const pageSizeOptions = [10, 25, 50];
 const defaultDatePreset: DatePreset = "7d";
@@ -262,6 +279,7 @@ function App() {
   const [data, setData] = useState<ReportResponse | null>(null);
   const [projectIndex, setProjectIndex] = useState<ProjectIndexResponse | null>(null);
   const [loading, setLoading] = useState(false);
+  const [initialIndexing, setInitialIndexing] = useState(false);
   const [error, setError] = useState("");
   const [conversationSession, setConversationSession] = useState<IndexedSession | null>(null);
   const [conversation, setConversation] = useState<SessionConversationResponse | null>(null);
@@ -406,6 +424,7 @@ function App() {
       return;
     }
 
+    setInitialIndexing(false);
     setLoading(true);
     setError("");
     try {
@@ -429,6 +448,7 @@ function App() {
 
   async function loadProjectIndex(refresh: boolean) {
     setLoading(true);
+    setInitialIndexing(false);
     setError("");
     try {
       const request = {
@@ -438,18 +458,24 @@ function App() {
         offline,
         noCost,
       };
-      const response = refresh ? await RefreshProjectIndex(request) : await GetProjectIndex();
-      setProjectIndex(response as ProjectIndexResponse);
+      let response = (refresh ? await RefreshProjectIndex(request) : await GetProjectIndex()) as ProjectIndexResponse;
+      if (!refresh && !response.lastIndexed) {
+        setInitialIndexing(true);
+        response = (await RefreshProjectIndex(request)) as ProjectIndexResponse;
+      }
+      setProjectIndex(response);
       setSelectedIndex(0);
-      setRunner((response as ProjectIndexResponse).runner);
+      setRunner(response.runner);
     } catch (err) {
       setError(errorMessage(err));
     } finally {
       setLoading(false);
+      setInitialIndexing(false);
     }
   }
 
   async function loadSettings() {
+    setInitialIndexing(false);
     setLoading(true);
     setError("");
     setSettingsStatus("");
@@ -600,13 +626,21 @@ function App() {
           </nav>
 
           <div className="border-t border-app-line px-4 py-4">
-            <div className="flex items-center gap-2 text-xs font-medium text-app-muted">
-              <Settings2 size={15} />
-              Direct refresh
-            </div>
-            <p className="mt-2 text-xs leading-5 text-app-muted">
-              Results come straight from ccusage. No persistent cache.
-            </p>
+            {report === "projects" ? (
+              <p className="text-xs leading-5 text-app-muted">
+                Last indexed {projectIndex?.lastIndexed ? formatDateTime(projectIndex.lastIndexed) : "—"}
+              </p>
+            ) : (
+              <>
+                <div className="flex items-center gap-2 text-xs font-medium text-app-muted">
+                  <Settings2 size={15} />
+                  Direct refresh
+                </div>
+                <p className="mt-2 text-xs leading-5 text-app-muted">
+                  Results come straight from ccusage. No persistent cache.
+                </p>
+              </>
+            )}
           </div>
         </aside>
 
@@ -617,14 +651,26 @@ function App() {
                 <h1 className="text-lg font-semibold">{activeReport(report).label}</h1>
                 <p className="mt-0.5 text-xs text-app-muted">{activeReport(report).description}</p>
               </div>
-              <button
-                className="icon-button"
-                onClick={refreshCurrentView}
-                disabled={loading}
-                title="Refresh"
-              >
-                <RefreshCw size={16} className={loading ? "animate-spin" : ""} />
-              </button>
+              {report === "projects" ? (
+                <button
+                  className="button shrink-0"
+                  onClick={refreshCurrentView}
+                  disabled={loading}
+                  title="Refresh Projects index"
+                >
+                  <RefreshCw size={16} className={loading ? "animate-spin" : ""} />
+                  {loading ? "Refreshing…" : "Refresh Index"}
+                </button>
+              ) : (
+                <button
+                  className="icon-button"
+                  onClick={refreshCurrentView}
+                  disabled={loading}
+                  title="Refresh"
+                >
+                  <RefreshCw size={16} className={loading ? "animate-spin" : ""} />
+                </button>
+              )}
             </div>
 
             {report !== "settings" ? (
@@ -720,18 +766,21 @@ function App() {
             {!error && report === "settings" ? (
               <EmptyState message="Edit the JSON settings on the right. Save, then refresh the Projects index." />
             ) : null}
+            {!error && report === "projects" && initialIndexing ? (
+              <EmptyState message="Building your Projects index for the first time. This can take a while for large ccusage histories — please keep the app open." />
+            ) : null}
             {!error && report === "projects" && indexGroupBy === "project" && filteredProjects.length === 0 && !loading ? (
               <EmptyState
-                message="No indexed projects yet. Refresh to build the local index."
-                actionLabel="Refresh Index"
-                onAction={() => void loadProjectIndex(true)}
+                message={projectIndex?.lastIndexed ? "No projects match the current source, date, or search filters." : "No indexed projects yet. The app will build the index automatically on first load."}
+                actionLabel="Reload Projects"
+                onAction={() => void loadProjectIndex(false)}
               />
             ) : null}
             {!error && report === "projects" && indexGroupBy !== "project" && filteredIndexGroups.length === 0 && !loading ? (
               <EmptyState
-                message="No indexed groups yet. Refresh to build the local index."
-                actionLabel="Refresh Index"
-                onAction={() => void loadProjectIndex(true)}
+                message={projectIndex?.lastIndexed ? "No groups match the current source, date, or search filters." : "No indexed groups yet. The app will build the index automatically on first load."}
+                actionLabel="Reload Groups"
+                onAction={() => void loadProjectIndex(false)}
               />
             ) : null}
             {!error && report !== "projects" && report !== "settings" && filteredRows.length === 0 && !loading ? (
@@ -835,7 +884,19 @@ function App() {
             </div>
           </div>
 
-          {activeSelectedRow || activeSelectedProject || activeSelectedIndexGroup ? (
+          {loading && !activeSelectedRow && !activeSelectedProject && !activeSelectedIndexGroup ? (
+            <div className="grid h-full place-items-center px-6 text-center text-app-muted">
+              <div>
+                <RefreshCw className="mx-auto mb-3 animate-spin text-app-accent" size={28} />
+                <p className="text-sm font-medium text-app-text">
+                  {report === "projects" ? (initialIndexing ? "Building your Projects index…" : "Refreshing Projects index…") : "Loading report…"}
+                </p>
+                <p className="mt-1 text-xs">
+                  {report === "projects" ? "This can take a while for large ccusage histories." : "Fetching usage details from ccusage."}
+                </p>
+              </div>
+            </div>
+          ) : activeSelectedRow || activeSelectedProject || activeSelectedIndexGroup ? (
             <div className="px-6 py-5">
               <div className="mb-5 flex items-start justify-between gap-5">
                 <div className="min-w-0">

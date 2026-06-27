@@ -107,6 +107,9 @@ func (a *App) GetSessionPreview(req SessionPreviewRequest) (SessionPreviewRespon
 		Supported: true,
 	}
 
+	indexDBMutex.Lock()
+	defer indexDBMutex.Unlock()
+
 	db, _, err := openIndexDB()
 	if err != nil {
 		return response, err
@@ -191,6 +194,9 @@ func writeCachedSessionPreview(db *sql.DB, sessionKey string, response SessionPr
 }
 
 func writeCachedSessionTiming(sessionKey string, activeDurationSeconds int64, metadata TranscriptMetadata) error {
+	indexDBMutex.Lock()
+	defer indexDBMutex.Unlock()
+
 	db, _, err := openIndexDB()
 	if err != nil {
 		return err
@@ -221,8 +227,12 @@ func locateTranscript(agent string, sessionID string, projectPath string) (strin
 		return locatePiTranscript(homeDir, sessionID, projectPath)
 	case "codex":
 		return locateCodexTranscript(homeDir, sessionID)
+	case "claude":
+		return locateClaudeTranscript(homeDir, sessionID)
+	case "opencode":
+		return locateOpenCodeTranscript(homeDir, sessionID)
 	default:
-		return "", errors.New("preview is only supported for codex and pi sessions")
+		return "", errors.New("preview is only supported for claude, codex, opencode, and pi sessions")
 	}
 }
 
@@ -248,6 +258,153 @@ func locateCodexTranscript(homeDir string, sessionID string) (string, error) {
 		}
 	}
 	return findJSONLByName(filepath.Join(homeDir, ".codex", "sessions"), sessionID)
+}
+
+func locateClaudeTranscript(homeDir string, sessionID string) (string, error) {
+	transcriptsDir := filepath.Join(homeDir, ".claude", "transcripts")
+	path := filepath.Join(transcriptsDir, sessionID+".jsonl")
+	if fileExists(path) {
+		return path, nil
+	}
+	if match, err := findJSONLByName(transcriptsDir, sessionID); err == nil {
+		return match, nil
+	}
+	return findJSONLByName(filepath.Join(homeDir, ".claude", "projects"), sessionID)
+}
+
+func locateOpenCodeTranscript(homeDir string, sessionID string) (string, error) {
+	dbPath := filepath.Join(homeDir, ".local", "share", "opencode", "opencode.db")
+	if !fileExists(dbPath) {
+		return "", errors.New("could not find opencode database")
+	}
+
+	cacheDir, err := os.UserCacheDir()
+	if err != nil {
+		return "", err
+	}
+	transcriptDir := filepath.Join(cacheDir, "ccusage-ui", "opencode-transcripts")
+	if err := os.MkdirAll(transcriptDir, 0o755); err != nil {
+		return "", err
+	}
+	transcriptPath := filepath.Join(transcriptDir, sessionID+".jsonl")
+
+	if err := exportOpenCodeSession(dbPath, sessionID, transcriptPath); err != nil {
+		return "", err
+	}
+	return transcriptPath, nil
+}
+
+func exportOpenCodeSession(dbPath string, sessionID string, transcriptPath string) error {
+	db, err := sql.Open("sqlite", dbPath+"?mode=ro&_pragma=busy_timeout(5000)")
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	rows, err := db.Query(`SELECT
+		m.id,
+		m.time_created,
+		m.data,
+		s.directory
+	FROM message m
+	JOIN session s ON s.id = m.session_id
+	WHERE m.session_id = ?
+	ORDER BY m.time_created, m.id`, sessionID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	var lines []string
+	for rows.Next() {
+		var messageID string
+		var createdMillis int64
+		var rawMessage string
+		var sessionDirectory string
+		if err := rows.Scan(&messageID, &createdMillis, &rawMessage, &sessionDirectory); err != nil {
+			return err
+		}
+
+		message := map[string]any{}
+		if err := json.Unmarshal([]byte(rawMessage), &message); err != nil {
+			continue
+		}
+		role := stringValue(message["role"])
+		if role != "user" && role != "assistant" {
+			continue
+		}
+
+		text, err := readOpenCodeMessageText(db, sessionID, messageID)
+		if err != nil {
+			return err
+		}
+		text = strings.TrimSpace(text)
+		if text == "" {
+			continue
+		}
+
+		line := map[string]any{
+			"type":      role,
+			"role":      role,
+			"timestamp": time.UnixMilli(createdMillis).Format(time.RFC3339Nano),
+			"content":   text,
+			"cwd":       firstNonEmptyString(openCodeMessageCWD(message), sessionDirectory),
+			"source":    "opencode",
+			"model":     stringValue(message["modelID"]),
+			"provider":  stringValue(message["providerID"]),
+		}
+		encoded, err := json.Marshal(line)
+		if err != nil {
+			return err
+		}
+		lines = append(lines, string(encoded))
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if len(lines) == 0 {
+		return errors.New("no opencode conversation messages found")
+	}
+
+	return os.WriteFile(transcriptPath, []byte(strings.Join(lines, "\n")+"\n"), 0o600)
+}
+
+func readOpenCodeMessageText(db *sql.DB, sessionID string, messageID string) (string, error) {
+	rows, err := db.Query(`SELECT data FROM part WHERE session_id = ? AND message_id = ? ORDER BY time_created, id`, sessionID, messageID)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+
+	parts := []string{}
+	for rows.Next() {
+		var rawPart string
+		if err := rows.Scan(&rawPart); err != nil {
+			return "", err
+		}
+		part := map[string]any{}
+		if err := json.Unmarshal([]byte(rawPart), &part); err != nil {
+			continue
+		}
+		if stringValue(part["type"]) != "text" {
+			continue
+		}
+		if text := strings.TrimSpace(stringValue(part["text"])); text != "" {
+			parts = append(parts, text)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	return strings.Join(parts, "\n\n"), nil
+}
+
+func openCodeMessageCWD(message map[string]any) string {
+	path, ok := message["path"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	return stringValue(path["cwd"])
 }
 
 func findFileContaining(dir string, fragment string) (string, bool) {
@@ -384,7 +541,16 @@ func extractConversationMessageFromJSONLine(line []byte) ConversationMessage {
 
 	if payload["type"] == "message" || payload["type"] == "user" {
 		if nested, ok := payload["message"].(map[string]any); ok {
+			if payload["type"] == "user" && stringValue(nested["role"]) == "" {
+				nested["role"] = "user"
+			}
 			return conversationMessageFromMap(nested, firstNonEmptyString(stringValue(payload["timestamp"]), stringValue(nested["timestamp"])))
+		}
+	}
+
+	if payloadType := stringValue(payload["type"]); payloadType == "user" || payloadType == "assistant" {
+		if stringValue(payload["role"]) == "" {
+			payload["role"] = payloadType
 		}
 	}
 
@@ -537,7 +703,13 @@ func extractUserMessageFromJSONLine(line []byte) (string, string) {
 
 	if payload["type"] == "user" {
 		if nested, ok := payload["message"].(map[string]any); ok {
+			if stringValue(nested["role"]) == "" {
+				nested["role"] = "user"
+			}
 			return messageText(nested, stringValue(payload["timestamp"]))
+		}
+		if stringValue(payload["role"]) == "" {
+			payload["role"] = "user"
 		}
 	}
 

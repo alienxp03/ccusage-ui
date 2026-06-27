@@ -181,7 +181,7 @@ func (a *App) GetReport(req ReportRequest) (ReportResponse, error) {
 }
 
 func detectRunner() RunnerInfo {
-	if path, err := exec.LookPath("ccusage"); err == nil {
+	if path, err := exec.LookPath("ccusage"); err == nil && commandRuns(path, "--version") {
 		return RunnerInfo{
 			Name:      "ccusage",
 			Path:      path,
@@ -234,6 +234,12 @@ func detectRunner() RunnerInfo {
 		Available: false,
 		Message:   "Could not find ccusage, bunx, nix, npx, or pnpm on PATH.",
 	}
+}
+
+func commandRuns(path string, args ...string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	return exec.CommandContext(ctx, path, args...).Run() == nil
 }
 
 func extractJSONObject(output []byte) ([]byte, error) {
