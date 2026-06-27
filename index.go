@@ -43,6 +43,7 @@ type ProjectSummary struct {
 	ProjectPath         string           `json:"projectPath"`
 	ProjectName         string           `json:"projectName"`
 	PhysicalPaths       []string         `json:"physicalPaths"`
+	PathExists          bool             `json:"pathExists"`
 	GroupingRule        string           `json:"groupingRule"`
 	Agents              []string         `json:"agents"`
 	SessionCount        int64            `json:"sessionCount"`
@@ -425,10 +426,10 @@ func replaceIndexedSessions(db *sql.DB, rows []ReportRow, indexedAt string) erro
 		sessionKey := agent + ":" + sessionID
 		projectPath := metadataString(row.Metadata, "projectPath")
 		transcriptMetadata := TranscriptMetadata{}
-		if projectPath == "" || agent == "codex" || agent == "claude" || agent == "opencode" {
+		if projectPath == "" || agent == "pi" || agent == "codex" || agent == "claude" || agent == "opencode" {
 			transcriptMetadata = inferTranscriptMetadata(row)
 		}
-		if projectPath == "" {
+		if transcriptMetadata.CWD != "" {
 			projectPath = transcriptMetadata.CWD
 		}
 		if projectPath == "" {
@@ -575,6 +576,7 @@ func readProjectIndex(db *sql.DB, dbPath string) (ProjectIndexResponse, error) {
 		projects[index].ModelBreakdowns = modelsByProject[projectPath]
 		projects[index].RecentSessions = sessionsByProject[projectPath]
 		projects[index].PhysicalPaths = physicalPathsByProject[projectPath]
+		projects[index].PathExists = projectPathExists(projectPath)
 	}
 
 	agentGroups, err := readAgentGroups(db)
@@ -1176,6 +1178,15 @@ func (a *App) OpenPathInFinder(path string) error {
 		return fmt.Errorf("could not find path %q", path)
 	}
 	return exec.Command("open", parent).Run()
+}
+
+func projectPathExists(projectPath string) bool {
+	path, err := resolveProjectPath(projectPath)
+	if err != nil {
+		return false
+	}
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
 }
 
 func resolveProjectPath(projectPath string) (string, error) {

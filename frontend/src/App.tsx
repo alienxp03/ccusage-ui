@@ -82,6 +82,7 @@ type ProjectSummary = {
   projectPath: string;
   projectName: string;
   physicalPaths: string[] | null;
+  pathExists: boolean;
   groupingRule: string;
   agents: string[] | null;
   sessionCount: number;
@@ -799,7 +800,7 @@ function App() {
                     <div className="min-w-0 flex-1">
                       <div className="truncate text-sm font-medium">{project.projectName}</div>
                       <div className="mt-1.5 flex min-w-0 items-center gap-2 text-xs text-app-muted">
-                        <AgentNameChips agents={project.agents ?? ["unknown"]} />
+                        <AgentNameChips agents={project.agents ?? ["unknown"]} maxVisible={3} />
                         <span className="h-1 w-1 rounded-full bg-app-muted/50" />
                         <span>{project.sessionCount} sessions</span>
                       </div>
@@ -824,7 +825,7 @@ function App() {
                     <div className="min-w-0 flex-1">
                       <div className="truncate text-sm font-medium">{group.name}</div>
                       <div className="mt-1.5 flex min-w-0 items-center gap-2 text-xs text-app-muted">
-                        <AgentNameChips agents={group.agents ?? ["unknown"]} />
+                        <AgentNameChips agents={group.agents ?? ["unknown"]} maxVisible={3} />
                         <span className="h-1 w-1 rounded-full bg-app-muted/50" />
                         <span>{group.projectCount} projects</span>
                       </div>
@@ -1261,23 +1262,27 @@ function ProjectDetail({
       <div className="mt-6">
         <div className="mb-2 flex items-center justify-between gap-3">
           <div className="min-w-0">
-            <h3 className="section-title mb-0">Path</h3>
+            <div className="flex items-center gap-2">
+              <h3 className="section-title mb-0">Path</h3>
+              {project.pathExists ? (
+                <button className="icon-button h-7 w-7" title="Reveal in Finder" onClick={() => onOpenPath(project.projectPath)}>
+                  <FolderOpen size={13} />
+                </button>
+              ) : null}
+            </div>
             {hasGroupedPaths ? (
               <div className="mt-1 text-xs text-app-muted">
                 {physicalPathCount} physical paths grouped by {project.groupingRule || "grouping rule"}
               </div>
+            ) : !project.pathExists ? (
+              <div className="mt-1 text-xs text-app-muted">This folder no longer exists on disk.</div>
             ) : null}
           </div>
-          <div className="flex items-center gap-2">
-            {hasGroupedPaths ? (
-              <button className="button h-8" onClick={() => setShowPhysicalPaths(true)}>
-                View paths
-              </button>
-            ) : null}
-            <button className="icon-button h-8 w-8" title="Reveal in Finder" onClick={() => onOpenPath(project.projectPath)}>
-              <FolderOpen size={15} />
+          {hasGroupedPaths ? (
+            <button className="button h-8" onClick={() => setShowPhysicalPaths(true)}>
+              View paths
             </button>
-          </div>
+          ) : null}
         </div>
         <code className="block overflow-x-auto rounded-md border border-app-line bg-app-surface px-3 py-2 text-xs text-app-muted">
           {cleanProjectPath(project.projectPath)}
@@ -1710,13 +1715,15 @@ function SessionPreviewText({
 }
 
 function AgentChips({row}: {row: ReportRow}) {
-  return <AgentNameChips agents={agentNames(row)} />;
+  return <AgentNameChips agents={agentNames(row)} maxVisible={3} />;
 }
 
-function AgentNameChips({agents}: {agents: string[]}) {
+function AgentNameChips({agents, maxVisible}: {agents: string[]; maxVisible?: number}) {
+  const visibleAgents = maxVisible ? agents.slice(0, maxVisible) : agents;
+  const hiddenCount = maxVisible ? Math.max(agents.length - maxVisible, 0) : 0;
   return (
-    <span className="flex min-w-0 items-center gap-1.5">
-      {agents.slice(0, 3).map((agent) => (
+    <span className={["flex min-w-0 items-center gap-1.5", maxVisible ? "" : "flex-wrap"].join(" ")}>
+      {visibleAgents.map((agent) => (
         <span
           key={agent}
           className="max-w-[78px] truncate rounded bg-app-accentSoft px-1.5 py-0.5 text-[11px] font-medium text-app-text"
@@ -1724,7 +1731,7 @@ function AgentNameChips({agents}: {agents: string[]}) {
           {agent}
         </span>
       ))}
-      {agents.length > 3 ? <span className="text-[11px] text-app-muted">+{agents.length - 3}</span> : null}
+      {hiddenCount > 0 ? <span className="text-[11px] text-app-muted">+{hiddenCount}</span> : null}
     </span>
   );
 }

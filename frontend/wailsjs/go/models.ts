@@ -293,6 +293,7 @@ export namespace main {
 	    projectPath: string;
 	    projectName: string;
 	    physicalPaths: string[];
+	    pathExists: boolean;
 	    groupingRule: string;
 	    agents: string[];
 	    sessionCount: number;
@@ -315,6 +316,7 @@ export namespace main {
 	        this.projectPath = source["projectPath"];
 	        this.projectName = source["projectName"];
 	        this.physicalPaths = source["physicalPaths"];
+	        this.pathExists = source["pathExists"];
 	        this.groupingRule = source["groupingRule"];
 	        this.agents = source["agents"];
 	        this.sessionCount = source["sessionCount"];
