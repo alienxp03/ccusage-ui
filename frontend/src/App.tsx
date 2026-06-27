@@ -1,6 +1,7 @@
 import {Fragment, type KeyboardEvent as ReactKeyboardEvent, useEffect, useMemo, useRef, useState} from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import {Bar, BarChart, CartesianGrid, Cell, ResponsiveContainer, Tooltip, XAxis, YAxis} from "recharts";
 import {
   Activity,
   BarChart3,
@@ -35,6 +36,7 @@ import {
 type ReportKey = "daily" | "weekly" | "monthly" | "session" | "projects" | "settings";
 type IndexGroupBy = "project" | "agent" | "model";
 type SortField = "lastActivity" | "totalCost" | "totalTokens";
+type UsageChartMetric = "totalCost" | "totalTokens" | "inputTokens" | "outputTokens" | "cacheReadTokens";
 type DatePreset = "all" | "today" | "7d" | "30d" | "month" | "custom";
 
 type RunnerInfo = {
@@ -275,6 +277,7 @@ function App() {
   const [query, setQuery] = useState("");
   const [indexGroupBy, setIndexGroupBy] = useState<IndexGroupBy>("project");
   const [projectSort, setProjectSort] = useState<SortField>("lastActivity");
+  const [usageChartMetric, setUsageChartMetric] = useState<UsageChartMetric>("totalCost");
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [runner, setRunner] = useState<RunnerInfo | null>(null);
   const [data, setData] = useState<ReportResponse | null>(null);
@@ -877,7 +880,18 @@ function App() {
           ) : (
             <>
           <div className="border-b border-app-line bg-app-bg/95 px-6 py-4">
-            <div className="grid grid-cols-4 gap-3">
+            {(report === "daily" || report === "weekly" || report === "monthly") && filteredRows.length > 0 ? (
+              <UsageTrendChart
+                rows={filteredRows}
+                report={report}
+                metric={usageChartMetric}
+                selectedIndex={selectedIndex}
+                noCost={noCost}
+                onMetricChange={setUsageChartMetric}
+                onSelect={setSelectedIndex}
+              />
+            ) : null}
+            <div className={(report === "daily" || report === "weekly" || report === "monthly") && filteredRows.length > 0 ? "mt-4 grid grid-cols-4 gap-3" : "grid grid-cols-4 gap-3"}>
               <Metric icon={DollarSign} label="Cost" value={formatCost(totals.totalCost, noCost)} />
               <Metric icon={Command} label="Tokens" value={formatTokens(totals.totalTokens)} />
               <Metric icon={Clock3} label="Input" value={formatTokens(totals.inputTokens)} />
@@ -1205,6 +1219,103 @@ function ConversationBubble({message}: {message: ConversationMessage}) {
         </div>
       </div>
     </article>
+  );
+}
+
+const usageChartMetrics: {key: UsageChartMetric; label: string}[] = [
+  {key: "totalCost", label: "Cost"},
+  {key: "totalTokens", label: "Tokens"},
+  {key: "inputTokens", label: "Input"},
+  {key: "outputTokens", label: "Output"},
+  {key: "cacheReadTokens", label: "Cache read"},
+];
+
+function UsageTrendChart({
+  rows,
+  report,
+  metric,
+  selectedIndex,
+  noCost,
+  onMetricChange,
+  onSelect,
+}: {
+  rows: ReportRow[];
+  report: ReportKey;
+  metric: UsageChartMetric;
+  selectedIndex: number;
+  noCost: boolean;
+  onMetricChange: (metric: UsageChartMetric) => void;
+  onSelect: (index: number) => void;
+}) {
+  const data = rows.map((row, index) => ({
+    ...row,
+    index,
+    label: usageChartLabel(row, report),
+    value: row[metric],
+  }));
+  const selectedPeriod = data[Math.min(selectedIndex, Math.max(data.length - 1, 0))];
+
+  return (
+    <section className="rounded-md border border-app-line bg-app-surface px-3 py-3">
+      <div className="mb-3 flex items-start justify-between gap-3">
+        <div>
+          <div className="text-xs font-semibold uppercase tracking-normal text-app-muted">{activeReport(report).label} trend</div>
+          <div className="mt-1 text-sm text-app-text">
+            {selectedPeriod ? `${selectedPeriod.label} · ${formatUsageChartValue(selectedPeriod.value, metric, noCost)}` : "No data"}
+          </div>
+        </div>
+        <select className="control h-8 text-xs" value={metric} onChange={(event) => onMetricChange(event.target.value as UsageChartMetric)}>
+          {usageChartMetrics.map((item) => (
+            <option key={item.key} value={item.key}>
+              {item.label}
+            </option>
+          ))}
+        </select>
+      </div>
+      <div className="h-52">
+        <ResponsiveContainer width="100%" height="100%">
+          <BarChart
+            data={data}
+            margin={{top: 8, right: 8, bottom: 0, left: 0}}
+            onClick={(state) => {
+              if (typeof state?.activeTooltipIndex === "number") {
+                onSelect(state.activeTooltipIndex);
+              }
+            }}
+          >
+            <CartesianGrid stroke="rgb(var(--color-line))" strokeOpacity={0.35} vertical={false} />
+            <XAxis dataKey="label" axisLine={false} tickLine={false} tick={{fill: "rgb(var(--color-muted))", fontSize: 11}} interval="preserveStartEnd" />
+            <YAxis
+              axisLine={false}
+              tickLine={false}
+              tick={{fill: "rgb(var(--color-muted))", fontSize: 11}}
+              tickFormatter={(value) => compactChartValue(Number(value), metric, noCost)}
+              width={52}
+            />
+            <Tooltip
+              cursor={{fill: "rgb(var(--color-accent-soft))", opacity: 0.25}}
+              content={({active, payload, label}) => {
+                if (!active || !payload?.length) {
+                  return null;
+                }
+                const value = Number(payload[0].value ?? 0);
+                return (
+                  <div className="rounded-md border border-app-line bg-app-bg px-3 py-2 text-xs shadow-xl">
+                    <div className="font-medium text-app-text">{label}</div>
+                    <div className="mt-1 text-app-muted">{formatUsageChartValue(value, metric, noCost)}</div>
+                  </div>
+                );
+              }}
+            />
+            <Bar dataKey="value" radius={[4, 4, 0, 0]}>
+              {data.map((item) => (
+                <Cell key={item.period} fill={item.index === selectedIndex ? "rgb(var(--color-accent))" : "rgb(var(--color-accent-soft))"} />
+              ))}
+            </Bar>
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+    </section>
   );
 }
 
@@ -1939,6 +2050,36 @@ function formatCost(value: number, noCost: boolean) {
 
 function formatTokens(value: number) {
   return new Intl.NumberFormat("en-US", {notation: "compact", maximumFractionDigits: 1}).format(value || 0);
+}
+
+function usageChartLabel(row: ReportRow, report: ReportKey) {
+  if (report === "daily") {
+    const date = parseDateOnly(row.period);
+    return date
+      ? new Intl.DateTimeFormat("en-GB", {day: "2-digit", month: "short"}).format(date)
+      : row.period;
+  }
+  if (report === "weekly") {
+    return row.period.replace(/^week-/, "W");
+  }
+  return formatMonthPeriod(row.period);
+}
+
+function formatUsageChartValue(value: number, metric: UsageChartMetric, noCost: boolean) {
+  if (metric === "totalCost") {
+    return formatCost(value, noCost);
+  }
+  return formatTokens(value);
+}
+
+function compactChartValue(value: number, metric: UsageChartMetric, noCost: boolean) {
+  if (metric === "totalCost" && noCost) {
+    return "hidden";
+  }
+  if (metric === "totalCost") {
+    return new Intl.NumberFormat("en-US", {style: "currency", currency: "USD", notation: "compact", maximumFractionDigits: 1}).format(value || 0);
+  }
+  return formatTokens(value);
 }
 
 function formatDuration(seconds: number) {
