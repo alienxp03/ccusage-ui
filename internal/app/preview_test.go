@@ -148,6 +148,24 @@ func TestReadGeminiSessionMeta(t *testing.T) {
 	}
 }
 
+func TestResolveGeminiNamedProjects(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	if err := os.MkdirAll(filepath.Join(home, ".gemini"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".gemini", "projects.json"), []byte(`{"projects":{"`+filepath.Join(home, "kaden")+`":"kaden"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// "kaden" is a name target (Gemini stores named projects under tmp/<name>/).
+	resolved := resolveGeminiProjectPaths(map[string]bool{"kaden": true})
+	if resolved["kaden"] != filepath.Join(home, "kaden") {
+		t.Fatalf("expected named project resolved via projects.json, got %#v", resolved)
+	}
+}
+
 func TestResolveGeminiProjectPaths(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

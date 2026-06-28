@@ -644,10 +644,12 @@ func lastTimestampInJSONL(path string) string {
 }
 
 
-// path. Gemini stores projects under ~/.gemini/tmp/<SHA-256(path)>/, so the hash
-// is one-way and must be resolved by hashing candidate paths. Seeds come from
-// Gemini's own config (projects.json, trustedFolders.json); the remainder are
-// discovered by walking the home directory (bounded depth, heavy trees pruned).
+// resolveGeminiProjectPaths maps Gemini project identifiers back to their
+// absolute path. Gemini stores projects under ~/.gemini/tmp/<id>/ where <id> is
+// either SHA-256(path) for unnamed projects or the project name for named ones
+// (per projects.json). Named ids resolve directly from projects.json; hash ids
+// are resolved by hashing candidate paths (Gemini config seeds, then a bounded
+// home walk with heavy trees pruned).
 func resolveGeminiProjectPaths(targets map[string]bool) map[string]string {
 	out := map[string]string{}
 	if len(targets) == 0 {
@@ -655,6 +657,16 @@ func resolveGeminiProjectPaths(targets map[string]bool) map[string]string {
 	}
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
+		return out
+	}
+
+	// Named projects live under tmp/<name>/ and projects.json maps name -> path.
+	for name, path := range geminiNamedProjects(homeDir) {
+		if targets[name] && out[name] == "" {
+			out[name] = path
+		}
+	}
+	if len(out) >= len(targets) {
 		return out
 	}
 
@@ -715,6 +727,28 @@ func resolveGeminiProjectPaths(targets map[string]bool) map[string]string {
 		}
 		return nil
 	})
+	return out
+}
+
+// geminiNamedProjects inverts Gemini's projects.json (path -> name) into a
+// name -> path map. Named projects are stored under ~/.gemini/tmp/<name>/.
+func geminiNamedProjects(homeDir string) map[string]string {
+	out := map[string]string{}
+	data, err := os.ReadFile(filepath.Join(homeDir, ".gemini", "projects.json"))
+	if err != nil {
+		return out
+	}
+	var wrapper struct {
+		Projects map[string]string `json:"projects"`
+	}
+	if json.Unmarshal(data, &wrapper) != nil {
+		return out
+	}
+	for path, name := range wrapper.Projects {
+		if name != "" {
+			out[name] = path
+		}
+	}
 	return out
 }
 
