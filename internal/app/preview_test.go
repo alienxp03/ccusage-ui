@@ -188,3 +188,119 @@ func TestResolveGeminiProjectPaths(t *testing.T) {
 		t.Fatalf("node_modules tree should have been pruned, got %#v", resolved)
 	}
 }
+
+func TestExtractConversationMessagesFromQwenJSONL(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session.jsonl")
+	// Qwen Code wraps messages under "message", carries text in "parts", and
+	// labels assistant turns with role "model".
+	content := `{"type":"user","timestamp":"2026-01-03T12:02:10.906Z","message":{"role":"user","parts":[{"text":"explain this repo"}]}}
+{"type":"assistant","timestamp":"2026-01-03T12:02:14.794Z","model":"qwen3","message":{"role":"model","parts":[{"text":"it is a dotfiles repo"}]}}
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	messages, err := extractConversationMessages(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(messages))
+	}
+	if messages[0].Role != "user" || messages[0].Text != "explain this repo" {
+		t.Fatalf("unexpected user message: %#v", messages[0])
+	}
+	if messages[1].Role != "assistant" || messages[1].Text != "it is a dotfiles repo" {
+		t.Fatalf("expected qwen model role mapped to assistant with parts text: %#v", messages[1])
+	}
+}
+
+func TestLocateQwenTranscript(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	chats := filepath.Join(home, ".qwen", "projects", "-Users-example-app", "chats")
+	if err := os.MkdirAll(chats, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const sid = "07b4abd0-0f15-4069-8639-6aeaaf3fc7eb"
+	if err := os.WriteFile(filepath.Join(chats, sid+".jsonl"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := locateQwenTranscript(home, sid)
+	if err != nil {
+		t.Fatalf("locateQwenTranscript failed: %v", err)
+	}
+	if filepath.Base(got) != sid+".jsonl" {
+		t.Fatalf("expected session transcript, got %s", got)
+	}
+}
+
+func TestLocateDroidTranscript(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	sessions := filepath.Join(home, ".factory", "sessions", "-Users-example-app")
+	if err := os.MkdirAll(sessions, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const sid = "71c73c67-90f7-49fd-af1e-2eaa17f1a11c"
+	if err := os.WriteFile(filepath.Join(sessions, sid+".jsonl"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Sidecar settings file must not be matched.
+	if err := os.WriteFile(filepath.Join(sessions, sid+".settings.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := locateDroidTranscript(home, sid)
+	if err != nil {
+		t.Fatalf("locateDroidTranscript failed: %v", err)
+	}
+	if filepath.Base(got) != sid+".jsonl" {
+		t.Fatalf("expected session transcript, got %s", got)
+	}
+}
+
+func TestLastTimestampInJSONL(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session.jsonl")
+	content := `{"type":"session_start","timestamp":"2026-02-20T06:29:42.000Z"}
+{"type":"message","timestamp":"2026-02-20T06:29:58.526Z","message":{"role":"assistant"}}
+{"type":"message","timestamp":"2026-02-20T06:29:50.000Z","message":{"role":"user"}}
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if ts := lastTimestampInJSONL(path); ts != "2026-02-20T06:29:58.526Z" {
+		t.Fatalf("expected latest timestamp, got %q", ts)
+	}
+}
+
+func TestReadDroidSessionMeta(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	sessions := filepath.Join(home, ".factory", "sessions", "-Users-example-app")
+	if err := os.MkdirAll(sessions, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const sid = "71c73c67-90f7-49fd-af1e-2eaa17f1a11c"
+	content := `{"type":"message","timestamp":"2026-02-20T06:29:50.000Z","message":{"role":"user"}}
+{"type":"message","timestamp":"2026-02-20T06:29:58.526Z","message":{"role":"assistant"}}
+`
+	if err := os.WriteFile(filepath.Join(sessions, sid+".jsonl"), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Sidecar settings file must be ignored.
+	if err := os.WriteFile(filepath.Join(sessions, sid+".settings.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	meta := readDroidSessionMeta()
+	if ts, ok := meta[sid]; !ok || ts != "2026-02-20T06:29:58.526Z" {
+		t.Fatalf("expected droid last activity mapped, got %#v", meta)
+	}
+}

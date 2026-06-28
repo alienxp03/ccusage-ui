@@ -235,8 +235,12 @@ func locateTranscript(agent string, sessionID string, projectPath string) (strin
 		return locateOpenCodeTranscript(homeDir, sessionID)
 	case "gemini":
 		return locateGeminiTranscript(homeDir, sessionID)
+	case "qwen":
+		return locateQwenTranscript(homeDir, sessionID)
+	case "droid":
+		return locateDroidTranscript(homeDir, sessionID)
 	default:
-		return "", errors.New("preview is only supported for claude, codex, gemini, opencode, and pi sessions")
+		return "", errors.New("preview is only supported for claude, codex, droid, gemini, opencode, pi, and qwen sessions")
 	}
 }
 
@@ -411,6 +415,18 @@ func openCodeMessageCWD(message map[string]any) string {
 	return stringValue(path["cwd"])
 }
 
+func locateQwenTranscript(homeDir string, sessionID string) (string, error) {
+	// Qwen Code (a Claude Code fork) stores JSONL transcripts under
+	// ~/.qwen/projects/<dashed-cwd>/chats/<sessionId>.jsonl.
+	return findJSONLByName(filepath.Join(homeDir, ".qwen", "projects"), sessionID)
+}
+
+func locateDroidTranscript(homeDir string, sessionID string) (string, error) {
+	// Factory Droid stores Claude-style JSONL transcripts under
+	// ~/.factory/sessions/<dashed-cwd>/<sessionId>.jsonl.
+	return findJSONLByName(filepath.Join(homeDir, ".factory", "sessions"), sessionID)
+}
+
 func locateGeminiTranscript(homeDir string, sessionID string) (string, error) {
 	sourcePath, err := findGeminiChatFile(homeDir, sessionID)
 	if err != nil {
@@ -573,7 +589,61 @@ func readGeminiSessionMeta() map[string]geminiSessionMeta {
 	return out
 }
 
-// resolveGeminiProjectPaths maps Gemini project hashes back to their absolute
+// readDroidSessionMeta scans Factory Droid transcripts once and maps session IDs
+// to their last message timestamp. ccusage omits lastActivity for droid sessions
+// (it would otherwise fall back to the session UUID), so the transcript is the
+// only source for a real timestamp.
+func readDroidSessionMeta() map[string]string {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return map[string]string{}
+	}
+	root := filepath.Join(homeDir, ".factory", "sessions")
+	out := map[string]string{}
+	_ = filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil || entry.IsDir() {
+			return nil
+		}
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".jsonl") {
+			return nil
+		}
+		sessionID := strings.TrimSuffix(name, ".jsonl")
+		if sessionID == "" {
+			return nil
+		}
+		if ts := lastTimestampInJSONL(path); ts != "" {
+			out[sessionID] = ts
+		}
+		return nil
+	})
+	return out
+}
+
+// lastTimestampInJSONL returns the most recent "timestamp" value across the JSON
+// lines of a transcript. ISO-8601 timestamps compare lexicographically.
+func lastTimestampInJSONL(path string) string {
+	file, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 0, 1024*1024), 16*1024*1024)
+	var latest string
+	for scanner.Scan() {
+		var payload map[string]any
+		if json.Unmarshal(scanner.Bytes(), &payload) != nil {
+			continue
+		}
+		if ts := stringValue(payload["timestamp"]); ts != "" && ts > latest {
+			latest = ts
+		}
+	}
+	return latest
+}
+
+
 // path. Gemini stores projects under ~/.gemini/tmp/<SHA-256(path)>/, so the hash
 // is one-way and must be resolved by hashing candidate paths. Seeds come from
 // Gemini's own config (projects.json, trustedFolders.json); the remainder are
@@ -805,23 +875,32 @@ func extractConversationMessageFromJSONLine(line []byte) ConversationMessage {
 	if err := json.Unmarshal(line, &payload); err != nil {
 		return ConversationMessage{}
 	}
+	payloadType := stringValue(payload["type"])
 
-	if payload["type"] == "response_item" {
+	if payloadType == "response_item" {
 		if nested, ok := payload["payload"].(map[string]any); ok {
 			return conversationMessageFromMap(nested, stringValue(payload["timestamp"]))
 		}
 	}
 
-	if payload["type"] == "message" || payload["type"] == "user" {
+	// Claude-style transcripts wrap the conversation under a "message" key for
+	// both user and assistant entries. Claude Code forks (Qwen Code, etc.) share
+	// this shape and sometimes tag assistant messages with role "model".
+	if payloadType == "message" || payloadType == "user" || payloadType == "assistant" {
 		if nested, ok := payload["message"].(map[string]any); ok {
-			if payload["type"] == "user" && stringValue(nested["role"]) == "" {
-				nested["role"] = "user"
+			role := stringValue(nested["role"])
+			if role == "" && (payloadType == "user" || payloadType == "assistant") {
+				role = payloadType
+				nested["role"] = role
+			}
+			if role == "model" {
+				nested["role"] = "assistant"
 			}
 			return conversationMessageFromMap(nested, firstNonEmptyString(stringValue(payload["timestamp"]), stringValue(nested["timestamp"])))
 		}
 	}
 
-	if payloadType := stringValue(payload["type"]); payloadType == "user" || payloadType == "assistant" {
+	if payloadType == "user" || payloadType == "assistant" {
 		if stringValue(payload["role"]) == "" {
 			payload["role"] = payloadType
 		}
@@ -837,6 +916,10 @@ func conversationMessageFromMap(message map[string]any, timestamp string) Conver
 	}
 
 	text := messageContentText(message["content"])
+	if text == "" {
+		// Qwen Code and other Claude forks carry text under "parts" instead of "content".
+		text = messageContentText(message["parts"])
+	}
 	if text == "" {
 		text = firstNonEmptyString(stringValue(message["text"]), stringValue(message["lastPrompt"]))
 	}

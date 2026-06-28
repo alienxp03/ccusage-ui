@@ -466,13 +466,15 @@ func replaceIndexedSessions(db *sql.DB, rows []ReportRow, indexedAt string) erro
 	}
 	defer insertModel.Close()
 
-	// ccusage omits lastActivity and projectPath for Gemini sessions (lastActivity
-	// would otherwise fall back to the session UUID and projects would all group
-	// under "(unknown)"). Scan the Gemini chat exports once, lazily, to backfill
-	// both from the transcripts and recovered project paths.
+	// ccusage omits lastActivity (and sometimes projectPath) for some agents, so
+	// lastActivity would otherwise fall back to the session UUID and projects
+	// would group under "(unknown)". Scan the relevant transcripts once, lazily,
+	// to backfill real values per agent.
 	var geminiMeta map[string]geminiSessionMeta
 	var geminiProjectPaths map[string]string
 	geminiLoaded := false
+	var droidActivity map[string]string
+	droidLoaded := false
 
 	for _, row := range rows {
 		sessionID := row.Period
@@ -491,6 +493,10 @@ func replaceIndexedSessions(db *sql.DB, rows []ReportRow, indexedAt string) erro
 			}
 			geminiProjectPaths = resolveGeminiProjectPaths(targetHashes)
 			geminiLoaded = true
+		}
+		if agent == "droid" && !droidLoaded {
+			droidActivity = readDroidSessionMeta()
+			droidLoaded = true
 		}
 		projectPath := metadataString(row.Metadata, "projectPath")
 		transcriptMetadata := TranscriptMetadata{}
@@ -529,6 +535,11 @@ func replaceIndexedSessions(db *sql.DB, rows []ReportRow, indexedAt string) erro
 		if agent == "gemini" {
 			if meta, ok := geminiMeta[sessionID]; ok && meta.lastActivity != "" {
 				lastActivity = meta.lastActivity
+			}
+		}
+		if agent == "droid" {
+			if ts := droidActivity[sessionID]; ts != "" {
+				lastActivity = ts
 			}
 		}
 
