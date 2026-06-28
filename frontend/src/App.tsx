@@ -31,12 +31,13 @@ import {
   OpenProjectInFinder,
   RefreshProjectIndex,
   SaveConfig,
-} from "../wailsjs/go/main/App";
+} from "../wailsjs/go/app/App";
 
 type ReportKey = "daily" | "weekly" | "monthly" | "session" | "projects" | "settings";
 type IndexGroupBy = "project" | "agent" | "model";
 type SortField = "lastActivity" | "totalCost" | "totalTokens";
 type UsageChartMetric = "totalCost" | "totalTokens" | "inputTokens" | "outputTokens" | "cacheReadTokens";
+type ProjectChartMetric = "totalCost" | "totalTokens" | "sessionCount" | "cacheReadTokens";
 type DatePreset = "all" | "today" | "7d" | "30d" | "month" | "custom";
 
 type RunnerInfo = {
@@ -180,7 +181,7 @@ type IndexGroup = {
 
 type IndexedAggregate = Pick<
   ProjectSummary,
-  "totalCost" | "totalTokens" | "inputTokens" | "outputTokens" | "cacheReadTokens"
+  "totalCost" | "totalTokens" | "inputTokens" | "outputTokens" | "cacheReadTokens" | "sessionCount"
 >;
 
 type ProjectIndexResponse = {
@@ -267,7 +268,7 @@ function initialSource() {
 function App() {
   const initialPreset = initialDatePreset();
   const initialRange = dateRangeForPreset(initialPreset);
-  const [report, setReport] = useState<ReportKey>("projects");
+  const [report, setReport] = useState<ReportKey>("daily");
   const [source, setSource] = useState(initialSource);
   const [since, setSince] = useState(initialRange.since);
   const [until, setUntil] = useState(initialRange.until);
@@ -278,6 +279,7 @@ function App() {
   const [indexGroupBy, setIndexGroupBy] = useState<IndexGroupBy>("project");
   const [projectSort, setProjectSort] = useState<SortField>("lastActivity");
   const [usageChartMetric, setUsageChartMetric] = useState<UsageChartMetric>("totalCost");
+  const [projectChartMetric, setProjectChartMetric] = useState<ProjectChartMetric>("totalCost");
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [runner, setRunner] = useState<RunnerInfo | null>(null);
   const [data, setData] = useState<ReportResponse | null>(null);
@@ -462,7 +464,7 @@ function App() {
         offline,
         noCost,
       };
-      let response = (refresh ? await RefreshProjectIndex(request) : await GetProjectIndex()) as ProjectIndexResponse;
+      let response = (refresh ? await RefreshProjectIndex(request) : await GetProjectIndex(request)) as ProjectIndexResponse;
       if (!refresh && !response.lastIndexed) {
         setInitialIndexing(true);
         response = (await RefreshProjectIndex(request)) as ProjectIndexResponse;
@@ -803,7 +805,7 @@ function App() {
                     <div className="min-w-0 flex-1">
                       <div className="truncate text-sm font-medium">{project.projectName}</div>
                       <div className="mt-1.5 flex min-w-0 items-center gap-2 text-xs text-app-muted">
-                        <AgentNameChips agents={project.agents ?? ["unknown"]} maxVisible={3} />
+                        <AgentNameChips agents={project.agents ?? ["unknown"]} maxVisible={2} />
                         <span className="h-1 w-1 rounded-full bg-app-muted/50" />
                         <span>{project.sessionCount} sessions</span>
                       </div>
@@ -828,7 +830,7 @@ function App() {
                     <div className="min-w-0 flex-1">
                       <div className="truncate text-sm font-medium">{group.name}</div>
                       <div className="mt-1.5 flex min-w-0 items-center gap-2 text-xs text-app-muted">
-                        <AgentNameChips agents={group.agents ?? ["unknown"]} maxVisible={3} />
+                        <AgentNameChips agents={group.agents ?? ["unknown"]} maxVisible={2} />
                         <span className="h-1 w-1 rounded-full bg-app-muted/50" />
                         <span>{group.projectCount} projects</span>
                       </div>
@@ -891,7 +893,18 @@ function App() {
                 onSelect={setSelectedIndex}
               />
             ) : null}
-            <div className={(report === "daily" || report === "weekly" || report === "monthly") && filteredRows.length > 0 ? "mt-4 grid grid-cols-4 gap-3" : "grid grid-cols-4 gap-3"}>
+            {report === "projects" && (indexGroupBy === "project" ? filteredProjects.length > 0 : filteredIndexGroups.length > 0) ? (
+              <ProjectUsageChart
+                rows={indexGroupBy === "project" ? filteredProjects : filteredIndexGroups}
+                groupBy={indexGroupBy}
+                metric={projectChartMetric}
+                selectedIndex={selectedIndex}
+                noCost={noCost}
+                onMetricChange={setProjectChartMetric}
+                onSelect={setSelectedIndex}
+              />
+            ) : null}
+            <div className={(report === "daily" || report === "weekly" || report === "monthly" || report === "projects") && (filteredRows.length > 0 || filteredProjects.length > 0 || filteredIndexGroups.length > 0) ? "mt-4 grid grid-cols-4 gap-3" : "grid grid-cols-4 gap-3"}>
               <Metric icon={DollarSign} label="Cost" value={formatCost(totals.totalCost, noCost)} />
               <Metric icon={Command} label="Tokens" value={formatTokens(totals.totalTokens)} />
               <Metric icon={Clock3} label="Input" value={formatTokens(totals.inputTokens)} />
@@ -912,8 +925,8 @@ function App() {
               </div>
             </div>
           ) : activeSelectedRow || activeSelectedProject || activeSelectedIndexGroup ? (
-            <div className="px-6 py-5">
-              <div className="mb-5 flex items-start justify-between gap-5">
+            <div className="px-5 py-4">
+              <div className="mb-4 flex items-start justify-between gap-5">
                 <div className="min-w-0">
                   <h2 className="truncate text-2xl font-semibold">
                     {activeSelectedProject
@@ -934,10 +947,6 @@ function App() {
                     </p>
                   )}
                 </div>
-                <button className="button" onClick={refreshCurrentView} disabled={loading}>
-                  <RefreshCw size={15} className={loading ? "animate-spin" : ""} />
-                  {report === "projects" ? "Refresh Index" : "Refresh"}
-                </button>
               </div>
 
               {activeSelectedProject ? (
@@ -1319,6 +1328,114 @@ function UsageTrendChart({
   );
 }
 
+const projectChartMetrics: {key: ProjectChartMetric; label: string}[] = [
+  {key: "totalCost", label: "Cost"},
+  {key: "totalTokens", label: "Tokens"},
+  {key: "sessionCount", label: "Sessions"},
+  {key: "cacheReadTokens", label: "Cache read"},
+];
+
+type ProjectChartRow = IndexedAggregate & Partial<Pick<ProjectSummary, "projectName" | "projectPath">> & Partial<Pick<IndexGroup, "name">>;
+
+function ProjectUsageChart({
+  rows,
+  groupBy,
+  metric,
+  selectedIndex,
+  noCost,
+  onMetricChange,
+  onSelect,
+}: {
+  rows: ProjectChartRow[];
+  groupBy: IndexGroupBy;
+  metric: ProjectChartMetric;
+  selectedIndex: number;
+  noCost: boolean;
+  onMetricChange: (metric: ProjectChartMetric) => void;
+  onSelect: (index: number) => void;
+}) {
+  const data = rows.slice(0, 10).map((row, index) => ({
+    ...row,
+    index,
+    label: projectChartLabel(row, groupBy),
+    value: row[metric],
+  }));
+  const selectedItem = rows[Math.min(selectedIndex, Math.max(rows.length - 1, 0))];
+
+  return (
+    <section className="rounded-md border border-app-line bg-app-surface px-3 py-3">
+      <div className="mb-3 flex items-start justify-between gap-3">
+        <div>
+          <div className="text-xs font-semibold uppercase tracking-normal text-app-muted">
+            Top {groupBy === "project" ? "projects" : `${groupBy}s`}
+          </div>
+          <div className="mt-1 text-sm text-app-text">
+            {selectedItem ? `${projectChartLabel(selectedItem, groupBy)} · ${formatProjectChartValue(selectedItem[metric], metric, noCost)}` : "No data"}
+          </div>
+        </div>
+        <select className="control h-8 text-xs" value={metric} onChange={(event) => onMetricChange(event.target.value as ProjectChartMetric)}>
+          {projectChartMetrics.map((item) => (
+            <option key={item.key} value={item.key}>
+              {item.label}
+            </option>
+          ))}
+        </select>
+      </div>
+      <div style={{height: Math.max(96, data.length * 34 + 34)}}>
+        <ResponsiveContainer width="100%" height="100%">
+          <BarChart
+            data={data}
+            layout="vertical"
+            margin={{top: 4, right: 8, bottom: 0, left: 8}}
+            onClick={(state) => {
+              if (typeof state?.activeTooltipIndex === "number") {
+                onSelect(data[state.activeTooltipIndex]?.index ?? state.activeTooltipIndex);
+              }
+            }}
+          >
+            <CartesianGrid stroke="rgb(var(--color-line))" strokeOpacity={0.35} horizontal={false} />
+            <XAxis
+              type="number"
+              axisLine={false}
+              tickLine={false}
+              tick={{fill: "rgb(var(--color-muted))", fontSize: 11}}
+              tickFormatter={(value) => compactProjectChartValue(Number(value), metric, noCost)}
+            />
+            <YAxis
+              type="category"
+              dataKey="label"
+              axisLine={false}
+              tickLine={false}
+              tick={{fill: "rgb(var(--color-muted))", fontSize: 11}}
+              width={130}
+            />
+            <Tooltip
+              cursor={{fill: "rgb(var(--color-accent-soft))", opacity: 0.25}}
+              content={({active, payload, label}) => {
+                if (!active || !payload?.length) {
+                  return null;
+                }
+                const value = Number(payload[0].value ?? 0);
+                return (
+                  <div className="rounded-md border border-app-line bg-app-bg px-3 py-2 text-xs shadow-xl">
+                    <div className="font-medium text-app-text">{label}</div>
+                    <div className="mt-1 text-app-muted">{formatProjectChartValue(value, metric, noCost)}</div>
+                  </div>
+                );
+              }}
+            />
+            <Bar dataKey="value" radius={[0, 4, 4, 0]}>
+              {data.map((item) => (
+                <Cell key={`${item.label}-${item.index}`} fill={item.index === selectedIndex ? "rgb(var(--color-accent))" : "rgb(var(--color-accent-soft))"} />
+              ))}
+            </Bar>
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+    </section>
+  );
+}
+
 function Metric({icon: Icon, label, value}: {icon: typeof Activity; label: string; value: string}) {
   return (
     <div className="rounded-md border border-app-line bg-app-surface px-3 py-2">
@@ -1333,9 +1450,9 @@ function Metric({icon: Icon, label, value}: {icon: typeof Activity; label: strin
 
 function DetailStat({label, value}: {label: string; value: string}) {
   return (
-    <div className="rounded-md border border-app-line bg-app-surface px-3 py-3">
+    <div className="rounded-md border border-app-line bg-app-surface px-3 py-2">
       <div className="text-xs text-app-muted">{label}</div>
-      <div className="mt-1 truncate text-base font-semibold">{value}</div>
+      <div className="mt-0.5 truncate text-base font-semibold">{value}</div>
     </div>
   );
 }
@@ -1370,7 +1487,7 @@ function ProjectDetail({
         <DetailStat label="Cache read" value={formatTokens(project.cacheReadTokens)} />
       </div>
 
-      <div className="mt-6">
+      <div className="mt-4">
         <div className="mb-2 flex items-center justify-between gap-3">
           <div className="min-w-0">
             <div className="flex items-center gap-2">
@@ -1400,7 +1517,7 @@ function ProjectDetail({
         </code>
       </div>
 
-      <div className="mt-6">
+      <div className="mt-4">
         <h3 className="section-title">Agents</h3>
         <div className="flex flex-wrap gap-2">
           <AgentNameChips agents={project.agents ?? ["unknown"]} />
@@ -1411,8 +1528,6 @@ function ProjectDetail({
         <PhysicalPathsModal project={project} onClose={() => setShowPhysicalPaths(false)} onOpenPath={onOpenPath} />
       ) : null}
 
-      <ModelBreakdownTable models={project.modelBreakdowns ?? []} noCost={noCost} />
-
       <RecentSessionsTable
         sessions={project.recentSessions ?? []}
         noCost={noCost}
@@ -1421,6 +1536,8 @@ function ProjectDetail({
         onOpenSession={onOpenSession}
         onOpenPath={onOpenPath}
       />
+
+      <ModelBreakdownTable models={project.modelBreakdowns ?? []} noCost={noCost} />
     </>
   );
 }
@@ -1941,13 +2058,10 @@ function formatMonthPeriod(period: string) {
 }
 
 function cleanProjectPath(value: string) {
-  const decoded = decodeProjectPath(value);
-  const homePrefix = "Users/azuan.zairein";
-  if (decoded === homePrefix) {
-    return "~";
-  }
-  if (decoded.startsWith(`${homePrefix}/`)) {
-    return `~/${decoded.slice(homePrefix.length + 1)}`;
+  const decoded = decodeProjectPath(value).replace(/^\//, "");
+  const homeMatch = /^Users\/[^/]+(?:\/(.*))?$/.exec(decoded);
+  if (homeMatch) {
+    return homeMatch[1] ? `~/${homeMatch[1]}` : "~";
   }
   return decoded;
 }
@@ -2052,6 +2166,15 @@ function formatTokens(value: number) {
   return new Intl.NumberFormat("en-US", {notation: "compact", maximumFractionDigits: 1}).format(value || 0);
 }
 
+function projectChartLabel(row: ProjectChartRow, groupBy: IndexGroupBy) {
+  const label = groupBy === "project" ? row.projectName || cleanProjectPath(row.projectPath || "") : row.name;
+  if (!label) {
+    return "Unknown";
+  }
+  const runes = Array.from(label);
+  return runes.length > 24 ? `${runes.slice(0, 23).join("")}…` : label;
+}
+
 function usageChartLabel(row: ReportRow, report: ReportKey) {
   if (report === "daily") {
     const date = parseDateOnly(row.period);
@@ -2063,6 +2186,26 @@ function usageChartLabel(row: ReportRow, report: ReportKey) {
     return row.period.replace(/^week-/, "W");
   }
   return formatMonthPeriod(row.period);
+}
+
+function formatProjectChartValue(value: number, metric: ProjectChartMetric, noCost: boolean) {
+  if (metric === "totalCost") {
+    return formatCost(value, noCost);
+  }
+  if (metric === "sessionCount") {
+    return new Intl.NumberFormat("en-US").format(value || 0);
+  }
+  return formatTokens(value);
+}
+
+function compactProjectChartValue(value: number, metric: ProjectChartMetric, noCost: boolean) {
+  if (metric === "sessionCount") {
+    return new Intl.NumberFormat("en-US", {notation: "compact", maximumFractionDigits: 1}).format(value || 0);
+  }
+  if (metric === "totalCost") {
+    return compactChartValue(value, "totalCost", noCost);
+  }
+  return formatTokens(value);
 }
 
 function formatUsageChartValue(value: number, metric: UsageChartMetric, noCost: boolean) {

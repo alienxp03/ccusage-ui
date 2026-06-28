@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"bytes"
@@ -26,6 +26,52 @@ type IndexRequest struct {
 	Until   string `json:"until"`
 	Offline bool   `json:"offline"`
 	NoCost  bool   `json:"noCost"`
+}
+
+// indexFilter narrows the cached session index by source (agent) and a
+// last-activity window at read time. The index is scanned once across all
+// sources/all time, so views can be filtered cheaply without re-scanning.
+type indexFilter struct {
+	source string // "all" (or "") disables the source filter
+	since  string // inclusive lower bound on last_activity (YYYY-MM-DD); "" disables
+	until  string // exclusive upper bound on last_activity (next-day YYYY-MM-DD); "" disables
+}
+
+func newIndexFilter(req IndexRequest) indexFilter {
+	source := strings.TrimSpace(req.Source)
+	if source == "" {
+		source = "all"
+	}
+	return indexFilter{source: source, since: strings.TrimSpace(req.Since), until: strings.TrimSpace(req.Until)}
+}
+
+// conditions builds the AND-joined WHERE fragments that scope project_sessions
+// rows (qualified by alias) to the filter. alias is the SQL qualifier for the
+// project_sessions table in the surrounding query (e.g. "project_sessions" or
+// "ps"). Returns "" with nil args when no filter applies.
+//
+// last_activity is stored as an ISO-8601 timestamp (e.g. "2026-06-25T10:00:00Z")
+// while since/until are YYYY-MM-DD, so a lexicographic comparison matches the
+// calendar window. until is the exclusive next day (mirrors ccusage --until).
+func (f indexFilter) conditions(alias string) (string, []any) {
+	var conds []string
+	var args []any
+	if f.source != "" && f.source != "all" {
+		conds = append(conds, alias+".agent = ?")
+		args = append(args, f.source)
+	}
+	if f.since != "" {
+		conds = append(conds, alias+".last_activity >= ?")
+		args = append(args, f.since)
+	}
+	if f.until != "" {
+		conds = append(conds, alias+".last_activity < ?")
+		args = append(args, f.until)
+	}
+	if len(conds) == 0 {
+		return "", nil
+	}
+	return strings.Join(conds, " AND "), args
 }
 
 type ProjectIndexResponse struct {
@@ -99,7 +145,10 @@ type IndexedSession struct {
 }
 
 func (a *App) RefreshProjectIndex(req IndexRequest) (ProjectIndexResponse, error) {
-	rows, runner, command, err := a.loadSessionRows(req)
+	// Always scan the full history across all sources so source/date filters can
+	// be applied at read time. Only offline/no-cost (cost computation) are honored.
+	broadScan := IndexRequest{Offline: req.Offline, NoCost: req.NoCost}
+	rows, runner, command, err := a.loadSessionRows(broadScan)
 	if err != nil {
 		return ProjectIndexResponse{}, err
 	}
@@ -122,7 +171,7 @@ func (a *App) RefreshProjectIndex(req IndexRequest) (ProjectIndexResponse, error
 		return ProjectIndexResponse{}, err
 	}
 
-	response, err := readProjectIndex(db, dbPath)
+	response, err := readProjectIndex(db, dbPath, newIndexFilter(req))
 	if err != nil {
 		return ProjectIndexResponse{}, err
 	}
@@ -132,7 +181,7 @@ func (a *App) RefreshProjectIndex(req IndexRequest) (ProjectIndexResponse, error
 	return response, nil
 }
 
-func (a *App) GetProjectIndex() (ProjectIndexResponse, error) {
+func (a *App) GetProjectIndex(req IndexRequest) (ProjectIndexResponse, error) {
 	indexDBMutex.Lock()
 	defer indexDBMutex.Unlock()
 
@@ -146,7 +195,7 @@ func (a *App) GetProjectIndex() (ProjectIndexResponse, error) {
 		return ProjectIndexResponse{}, err
 	}
 
-	response, err := readProjectIndex(db, dbPath)
+	response, err := readProjectIndex(db, dbPath, newIndexFilter(req))
 	if err != nil {
 		return ProjectIndexResponse{}, err
 	}
@@ -417,6 +466,14 @@ func replaceIndexedSessions(db *sql.DB, rows []ReportRow, indexedAt string) erro
 	}
 	defer insertModel.Close()
 
+	// ccusage omits lastActivity and projectPath for Gemini sessions (lastActivity
+	// would otherwise fall back to the session UUID and projects would all group
+	// under "(unknown)"). Scan the Gemini chat exports once, lazily, to backfill
+	// both from the transcripts and recovered project paths.
+	var geminiMeta map[string]geminiSessionMeta
+	var geminiProjectPaths map[string]string
+	geminiLoaded := false
+
 	for _, row := range rows {
 		sessionID := row.Period
 		agent := row.Agent
@@ -424,6 +481,17 @@ func replaceIndexedSessions(db *sql.DB, rows []ReportRow, indexedAt string) erro
 			agent = "all"
 		}
 		sessionKey := agent + ":" + sessionID
+		if agent == "gemini" && !geminiLoaded {
+			geminiMeta = readGeminiSessionMeta()
+			targetHashes := map[string]bool{}
+			for _, meta := range geminiMeta {
+				if meta.projectHash != "" {
+					targetHashes[meta.projectHash] = true
+				}
+			}
+			geminiProjectPaths = resolveGeminiProjectPaths(targetHashes)
+			geminiLoaded = true
+		}
 		projectPath := metadataString(row.Metadata, "projectPath")
 		transcriptMetadata := TranscriptMetadata{}
 		if projectPath == "" || agent == "pi" || agent == "codex" || agent == "claude" || agent == "opencode" {
@@ -431,6 +499,13 @@ func replaceIndexedSessions(db *sql.DB, rows []ReportRow, indexedAt string) erro
 		}
 		if transcriptMetadata.CWD != "" {
 			projectPath = transcriptMetadata.CWD
+		}
+		if agent == "gemini" {
+			if meta, ok := geminiMeta[sessionID]; ok && meta.projectHash != "" {
+				if path := geminiProjectPaths[meta.projectHash]; path != "" {
+					projectPath = path
+				}
+			}
 		}
 		if projectPath == "" {
 			projectPath = "(unknown)"
@@ -450,6 +525,11 @@ func replaceIndexedSessions(db *sql.DB, rows []ReportRow, indexedAt string) erro
 		lastActivity := metadataString(row.Metadata, "lastActivity")
 		if lastActivity == "" {
 			lastActivity = row.Period
+		}
+		if agent == "gemini" {
+			if meta, ok := geminiMeta[sessionID]; ok && meta.lastActivity != "" {
+				lastActivity = meta.lastActivity
+			}
 		}
 
 		modelsJSON, _ := json.Marshal(row.ModelsUsed)
@@ -506,10 +586,15 @@ func replaceIndexedSessions(db *sql.DB, rows []ReportRow, indexedAt string) erro
 	return tx.Commit()
 }
 
-func readProjectIndex(db *sql.DB, dbPath string) (ProjectIndexResponse, error) {
+func readProjectIndex(db *sql.DB, dbPath string, filter indexFilter) (ProjectIndexResponse, error) {
 	lastIndexed := ""
 	_ = db.QueryRow(`SELECT value FROM index_meta WHERE key = 'last_indexed'`).Scan(&lastIndexed)
 
+	conds, args := filter.conditions("project_sessions")
+	whereClause := ""
+	if conds != "" {
+		whereClause = " WHERE " + conds
+	}
 	rows, err := db.Query(`SELECT
 		logical_project_path,
 		logical_project_name,
@@ -522,9 +607,9 @@ func readProjectIndex(db *sql.DB, dbPath string) (ProjectIndexResponse, error) {
 		SUM(total_tokens) AS total_tokens,
 		SUM(total_cost) AS total_cost,
 		MIN(grouping_rule) AS grouping_rule
-	FROM project_sessions
+	FROM project_sessions`+whereClause+`
 	GROUP BY logical_project_path, logical_project_name
-	ORDER BY last_activity DESC, total_cost DESC, total_tokens DESC`)
+	ORDER BY last_activity DESC, total_cost DESC, total_tokens DESC`, args...)
 	if err != nil {
 		return ProjectIndexResponse{}, err
 	}
@@ -554,19 +639,19 @@ func readProjectIndex(db *sql.DB, dbPath string) (ProjectIndexResponse, error) {
 		return ProjectIndexResponse{}, err
 	}
 
-	agentsByProject, err := readAllProjectAgents(db)
+	agentsByProject, err := readAllProjectAgents(db, filter)
 	if err != nil {
 		return ProjectIndexResponse{}, err
 	}
-	modelsByProject, err := readAllProjectModels(db)
+	modelsByProject, err := readAllProjectModels(db, filter)
 	if err != nil {
 		return ProjectIndexResponse{}, err
 	}
-	sessionsByProject, err := readAllProjectSessions(db)
+	sessionsByProject, err := readAllProjectSessions(db, filter)
 	if err != nil {
 		return ProjectIndexResponse{}, err
 	}
-	physicalPathsByProject, err := readAllProjectPhysicalPaths(db)
+	physicalPathsByProject, err := readAllProjectPhysicalPaths(db, filter)
 	if err != nil {
 		return ProjectIndexResponse{}, err
 	}
@@ -579,11 +664,11 @@ func readProjectIndex(db *sql.DB, dbPath string) (ProjectIndexResponse, error) {
 		projects[index].PathExists = projectPathExists(projectPath)
 	}
 
-	agentGroups, err := readAgentGroups(db)
+	agentGroups, err := readAgentGroups(db, filter)
 	if err != nil {
 		return ProjectIndexResponse{}, err
 	}
-	modelGroups, err := readModelGroups(db)
+	modelGroups, err := readModelGroups(db, filter)
 	if err != nil {
 		return ProjectIndexResponse{}, err
 	}
@@ -598,8 +683,13 @@ func readProjectIndex(db *sql.DB, dbPath string) (ProjectIndexResponse, error) {
 	}, nil
 }
 
-func readAllProjectAgents(db *sql.DB) (map[string][]string, error) {
-	rows, err := db.Query(`SELECT logical_project_path, agent FROM project_sessions GROUP BY logical_project_path, agent ORDER BY logical_project_path, agent`)
+func readAllProjectAgents(db *sql.DB, filter indexFilter) (map[string][]string, error) {
+	conds, args := filter.conditions("project_sessions")
+	whereClause := ""
+	if conds != "" {
+		whereClause = " WHERE " + conds
+	}
+	rows, err := db.Query(`SELECT logical_project_path, agent FROM project_sessions`+whereClause+` GROUP BY logical_project_path, agent ORDER BY logical_project_path, agent`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -617,7 +707,12 @@ func readAllProjectAgents(db *sql.DB) (map[string][]string, error) {
 	return agentsByProject, rows.Err()
 }
 
-func readAllProjectModels(db *sql.DB) (map[string][]ModelBreakdown, error) {
+func readAllProjectModels(db *sql.DB, filter indexFilter) (map[string][]ModelBreakdown, error) {
+	conds, args := filter.conditions("ps")
+	andClause := ""
+	if conds != "" {
+		andClause = " AND " + conds
+	}
 	rows, err := db.Query(`SELECT
 		ps.logical_project_path,
 		sm.model_name,
@@ -627,9 +722,9 @@ func readAllProjectModels(db *sql.DB) (map[string][]ModelBreakdown, error) {
 		SUM(sm.cache_read_tokens),
 		SUM(sm.cost)
 	FROM session_models sm
-	INNER JOIN project_sessions ps ON ps.session_key = sm.session_key
+	INNER JOIN project_sessions ps ON ps.session_key = sm.session_key`+andClause+`
 	GROUP BY ps.logical_project_path, sm.model_name
-	ORDER BY ps.logical_project_path, SUM(sm.cost) DESC, SUM(sm.input_tokens + sm.output_tokens + sm.cache_read_tokens) DESC`)
+	ORDER BY ps.logical_project_path, SUM(sm.cost) DESC, SUM(sm.input_tokens + sm.output_tokens + sm.cache_read_tokens) DESC`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -655,12 +750,17 @@ func readAllProjectModels(db *sql.DB) (map[string][]ModelBreakdown, error) {
 	return modelsByProject, rows.Err()
 }
 
-func readAllProjectSessions(db *sql.DB) (map[string][]IndexedSession, error) {
+func readAllProjectSessions(db *sql.DB, filter indexFilter) (map[string][]IndexedSession, error) {
 	modelsBySession, err := readAllSessionModels(db)
 	if err != nil {
 		return nil, err
 	}
 
+	conds, args := filter.conditions("project_sessions")
+	whereClause := ""
+	if conds != "" {
+		whereClause = " WHERE " + conds
+	}
 	rows, err := db.Query(`SELECT
 		session_key,
 		session_id,
@@ -684,8 +784,8 @@ func readAllProjectSessions(db *sql.DB) (map[string][]IndexedSession, error) {
 		model,
 		provider,
 		reasoning_level
-	FROM project_sessions
-	ORDER BY logical_project_path, last_activity DESC`)
+	FROM project_sessions`+whereClause+`
+	ORDER BY logical_project_path, last_activity DESC`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -728,11 +828,16 @@ func readAllProjectSessions(db *sql.DB) (map[string][]IndexedSession, error) {
 	return sessionsByProject, rows.Err()
 }
 
-func readAllProjectPhysicalPaths(db *sql.DB) (map[string][]string, error) {
+func readAllProjectPhysicalPaths(db *sql.DB, filter indexFilter) (map[string][]string, error) {
+	conds, args := filter.conditions("project_sessions")
+	whereClause := ""
+	if conds != "" {
+		whereClause = " WHERE " + conds
+	}
 	rows, err := db.Query(`SELECT logical_project_path, project_path
-	FROM project_sessions
+	FROM project_sessions`+whereClause+`
 	GROUP BY logical_project_path, project_path
-	ORDER BY logical_project_path, project_path`)
+	ORDER BY logical_project_path, project_path`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -909,7 +1014,12 @@ func readSessionModels(db *sql.DB, sessionKey string) ([]ModelBreakdown, error) 
 	return models, rows.Err()
 }
 
-func readAgentGroups(db *sql.DB) ([]IndexGroup, error) {
+func readAgentGroups(db *sql.DB, filter indexFilter) ([]IndexGroup, error) {
+	conds, args := filter.conditions("project_sessions")
+	whereClause := ""
+	if conds != "" {
+		whereClause = " WHERE " + conds
+	}
 	rows, err := db.Query(`SELECT
 		agent,
 		COUNT(DISTINCT project_path),
@@ -921,9 +1031,9 @@ func readAgentGroups(db *sql.DB) ([]IndexGroup, error) {
 		SUM(cache_read_tokens),
 		SUM(total_tokens),
 		SUM(total_cost)
-	FROM project_sessions
+	FROM project_sessions`+whereClause+`
 	GROUP BY agent
-	ORDER BY SUM(total_cost) DESC, SUM(total_tokens) DESC`)
+	ORDER BY SUM(total_cost) DESC, SUM(total_tokens) DESC`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -953,7 +1063,7 @@ func readAgentGroups(db *sql.DB) ([]IndexGroup, error) {
 		return nil, err
 	}
 
-	modelsByAgent, err := readAllAgentModels(db)
+	modelsByAgent, err := readAllAgentModels(db, filter)
 	if err != nil {
 		return nil, err
 	}
@@ -963,7 +1073,12 @@ func readAgentGroups(db *sql.DB) ([]IndexGroup, error) {
 	return groups, nil
 }
 
-func readAllAgentModels(db *sql.DB) (map[string][]ModelBreakdown, error) {
+func readAllAgentModels(db *sql.DB, filter indexFilter) (map[string][]ModelBreakdown, error) {
+	conds, args := filter.conditions("ps")
+	andClause := ""
+	if conds != "" {
+		andClause = " AND " + conds
+	}
 	rows, err := db.Query(`SELECT
 		ps.agent,
 		sm.model_name,
@@ -973,9 +1088,9 @@ func readAllAgentModels(db *sql.DB) (map[string][]ModelBreakdown, error) {
 		SUM(sm.cache_read_tokens),
 		SUM(sm.cost)
 	FROM session_models sm
-	INNER JOIN project_sessions ps ON ps.session_key = sm.session_key
+	INNER JOIN project_sessions ps ON ps.session_key = sm.session_key`+andClause+`
 	GROUP BY ps.agent, sm.model_name
-	ORDER BY ps.agent, SUM(sm.cost) DESC`)
+	ORDER BY ps.agent, SUM(sm.cost) DESC`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1001,7 +1116,12 @@ func readAllAgentModels(db *sql.DB) (map[string][]ModelBreakdown, error) {
 	return modelsByAgent, rows.Err()
 }
 
-func readModelGroups(db *sql.DB) ([]IndexGroup, error) {
+func readModelGroups(db *sql.DB, filter indexFilter) ([]IndexGroup, error) {
+	conds, args := filter.conditions("ps")
+	andClause := ""
+	if conds != "" {
+		andClause = " AND " + conds
+	}
 	rows, err := db.Query(`SELECT
 		sm.model_name,
 		COUNT(DISTINCT ps.project_path),
@@ -1014,9 +1134,9 @@ func readModelGroups(db *sql.DB) ([]IndexGroup, error) {
 		SUM(sm.input_tokens + sm.output_tokens + sm.cache_creation_tokens + sm.cache_read_tokens),
 		SUM(sm.cost)
 	FROM session_models sm
-	INNER JOIN project_sessions ps ON ps.session_key = sm.session_key
+	INNER JOIN project_sessions ps ON ps.session_key = sm.session_key`+andClause+`
 	GROUP BY sm.model_name
-	ORDER BY SUM(sm.cost) DESC, SUM(sm.input_tokens + sm.output_tokens + sm.cache_read_tokens) DESC`)
+	ORDER BY SUM(sm.cost) DESC, SUM(sm.input_tokens + sm.output_tokens + sm.cache_read_tokens) DESC`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1055,7 +1175,7 @@ func readModelGroups(db *sql.DB) ([]IndexGroup, error) {
 		return nil, err
 	}
 
-	agentsByModel, err := readAllModelAgents(db)
+	agentsByModel, err := readAllModelAgents(db, filter)
 	if err != nil {
 		return nil, err
 	}
@@ -1065,12 +1185,17 @@ func readModelGroups(db *sql.DB) ([]IndexGroup, error) {
 	return groups, nil
 }
 
-func readAllModelAgents(db *sql.DB) (map[string][]string, error) {
+func readAllModelAgents(db *sql.DB, filter indexFilter) (map[string][]string, error) {
+	conds, args := filter.conditions("ps")
+	andClause := ""
+	if conds != "" {
+		andClause = " AND " + conds
+	}
 	rows, err := db.Query(`SELECT sm.model_name, ps.agent
 	FROM project_sessions ps
-	INNER JOIN session_models sm ON sm.session_key = ps.session_key
+	INNER JOIN session_models sm ON sm.session_key = ps.session_key`+andClause+`
 	GROUP BY sm.model_name, ps.agent
-	ORDER BY sm.model_name, ps.agent`)
+	ORDER BY sm.model_name, ps.agent`, args...)
 	if err != nil {
 		return nil, err
 	}

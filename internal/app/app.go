@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"bytes"
@@ -88,7 +88,7 @@ func NewApp() *App {
 	return &App{}
 }
 
-func (a *App) startup(ctx context.Context) {
+func (a *App) Startup(ctx context.Context) {
 	a.ctx = ctx
 }
 
@@ -311,7 +311,12 @@ func normalizeReport(report string, data []byte) ([]ReportRow, map[string]any, e
 		}
 		period := row.Period
 		if period == "" {
-			period = rawString(raw, "sessionId")
+			period = firstNonEmptyString(
+				rawString(raw, "date"),
+				rawString(raw, "week"),
+				rawString(raw, "month"),
+				rawString(raw, "sessionId"),
+			)
 		}
 		metadata := row.Metadata
 		if metadata == nil {
@@ -321,6 +326,9 @@ func normalizeReport(report string, data []byte) ([]ReportRow, map[string]any, e
 			if lastActivity := rawString(raw, "lastActivity"); lastActivity != "" {
 				metadata["lastActivity"] = lastActivity
 			}
+		}
+		if projectPath := metadataString(metadata, "projectPath"); projectPath != "" {
+			metadata["projectPath"] = decodeProjectPathForGrouping(projectPath)
 		}
 		totalCost := row.TotalCost
 		if totalCost == 0 {

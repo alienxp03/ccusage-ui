@@ -1,8 +1,10 @@
-package main
+package app
 
 import (
 	"bufio"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -231,8 +233,10 @@ func locateTranscript(agent string, sessionID string, projectPath string) (strin
 		return locateClaudeTranscript(homeDir, sessionID)
 	case "opencode":
 		return locateOpenCodeTranscript(homeDir, sessionID)
+	case "gemini":
+		return locateGeminiTranscript(homeDir, sessionID)
 	default:
-		return "", errors.New("preview is only supported for claude, codex, opencode, and pi sessions")
+		return "", errors.New("preview is only supported for claude, codex, gemini, opencode, and pi sessions")
 	}
 }
 
@@ -405,6 +409,275 @@ func openCodeMessageCWD(message map[string]any) string {
 		return ""
 	}
 	return stringValue(path["cwd"])
+}
+
+func locateGeminiTranscript(homeDir string, sessionID string) (string, error) {
+	sourcePath, err := findGeminiChatFile(homeDir, sessionID)
+	if err != nil {
+		return "", err
+	}
+
+	cacheDir, err := os.UserCacheDir()
+	if err != nil {
+		return "", err
+	}
+	transcriptDir := filepath.Join(cacheDir, "ccusage-ui", "gemini-transcripts")
+	if err := os.MkdirAll(transcriptDir, 0o755); err != nil {
+		return "", err
+	}
+	transcriptPath := filepath.Join(transcriptDir, sessionID+".jsonl")
+
+	if err := exportGeminiSession(sourcePath, transcriptPath); err != nil {
+		return "", err
+	}
+	return transcriptPath, nil
+}
+
+// findGeminiChatFile locates the Gemini CLI chat export for a session. Files are
+// stored under ~/.gemini/tmp/<projectHash>/chats/session-<timestamp>-<id>.json,
+// where <id> is the first 8 hex chars of the session UUID.
+func findGeminiChatFile(homeDir string, sessionID string) (string, error) {
+	fragment := geminiSessionFragment(sessionID)
+	root := filepath.Join(homeDir, ".gemini", "tmp")
+	var found string
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil || entry.IsDir() || found != "" {
+			return nil
+		}
+		name := entry.Name()
+		if strings.HasPrefix(name, "session-") && strings.HasSuffix(name, ".json") && strings.Contains(name, fragment) {
+			found = path
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	if found == "" {
+		return "", errors.New("could not find gemini transcript file")
+	}
+	return found, nil
+}
+
+func geminiSessionFragment(sessionID string) string {
+	cleaned := strings.ReplaceAll(sessionID, "-", "")
+	if len(cleaned) >= 8 {
+		return cleaned[:8]
+	}
+	return sessionID
+}
+
+// exportGeminiSession converts a Gemini CLI chat export (a single JSON object)
+// into the JSONL shape the transcript readers expect, mapping the "gemini"
+// assistant message type to role "assistant".
+func exportGeminiSession(sourcePath string, transcriptPath string) error {
+	data, err := os.ReadFile(sourcePath)
+	if err != nil {
+		return err
+	}
+	var session struct {
+		Messages []struct {
+			Timestamp string `json:"timestamp"`
+			Type      string `json:"type"`
+			Role      string `json:"role"`
+			Content   string `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(data, &session); err != nil {
+		return err
+	}
+
+	lines := make([]string, 0, len(session.Messages))
+	for _, message := range session.Messages {
+		role := strings.TrimSpace(message.Role)
+		if role == "" {
+			if message.Type == "user" {
+				role = "user"
+			} else {
+				role = "assistant"
+			}
+		}
+		if role != "user" && role != "assistant" {
+			continue
+		}
+		text := strings.TrimSpace(message.Content)
+		if text == "" {
+			continue
+		}
+		encoded, err := json.Marshal(map[string]any{
+			"type":      role,
+			"role":      role,
+			"timestamp": message.Timestamp,
+			"content":   text,
+			"source":    "gemini",
+			"provider":  "google",
+		})
+		if err != nil {
+			return err
+		}
+		lines = append(lines, string(encoded))
+	}
+	if len(lines) == 0 {
+		return errors.New("no gemini conversation messages found")
+	}
+	return os.WriteFile(transcriptPath, []byte(strings.Join(lines, "\n")+"\n"), 0o600)
+}
+
+// geminiSessionMeta captures what the indexer needs from a Gemini chat export
+// that ccusage does not provide: a real last-activity timestamp and the project
+// hash used to recover the working directory.
+type geminiSessionMeta struct {
+	lastActivity string
+	projectHash  string
+}
+
+// readGeminiSessionMeta scans Gemini CLI chat exports once and maps session
+// UUIDs to their lastUpdated timestamp and project hash. ccusage does not expose
+// lastActivity or projectPath for Gemini sessions, so the transcript is the only
+// source. The project hash is the ~/.gemini/tmp/<hash>/ directory name.
+func readGeminiSessionMeta() map[string]geminiSessionMeta {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return map[string]geminiSessionMeta{}
+	}
+	root := filepath.Join(homeDir, ".gemini", "tmp")
+	out := map[string]geminiSessionMeta{}
+	_ = filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil || entry.IsDir() {
+			return nil
+		}
+		name := entry.Name()
+		if !strings.HasPrefix(name, "session-") || !strings.HasSuffix(name, ".json") {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+		var session struct {
+			SessionID   string `json:"sessionId"`
+			LastUpdated string `json:"lastUpdated"`
+		}
+		if err := json.Unmarshal(data, &session); err != nil {
+			return nil
+		}
+		if session.SessionID == "" {
+			return nil
+		}
+		// path = ~/.gemini/tmp/<hash>/chats/<file> -> <hash> is two dirs up.
+		projectHash := filepath.Base(filepath.Dir(filepath.Dir(path)))
+		out[session.SessionID] = geminiSessionMeta{lastActivity: session.LastUpdated, projectHash: projectHash}
+		return nil
+	})
+	return out
+}
+
+// resolveGeminiProjectPaths maps Gemini project hashes back to their absolute
+// path. Gemini stores projects under ~/.gemini/tmp/<SHA-256(path)>/, so the hash
+// is one-way and must be resolved by hashing candidate paths. Seeds come from
+// Gemini's own config (projects.json, trustedFolders.json); the remainder are
+// discovered by walking the home directory (bounded depth, heavy trees pruned).
+func resolveGeminiProjectPaths(targets map[string]bool) map[string]string {
+	out := map[string]string{}
+	if len(targets) == 0 {
+		return out
+	}
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return out
+	}
+
+	consider := func(path string) {
+		if path == "" {
+			return
+		}
+		hash := sha256Hex(path)
+		if targets[hash] && out[hash] == "" {
+			out[hash] = path
+		}
+	}
+
+	// Direct hits from Gemini config (paths may sit outside the walked depth).
+	for _, path := range geminiKnownProjectPaths(homeDir) {
+		consider(path)
+	}
+	if len(out) >= len(targets) {
+		return out
+	}
+
+	// Heavy/system/package trees that must not be descended into. The walk is
+	// also depth-capped so we consider project roots but not their source trees.
+	skip := map[string]bool{
+		"Library": true, ".Trash": true, "Caches": true, ".cache": true,
+		"Pictures": true, "Music": true, "Movies": true, "Downloads": true,
+		"Applications": true, "Public": true, "Parallels": true, "OneDrive": true,
+		"node_modules": true, ".git": true, ".svn": true, ".hg": true,
+		".npm": true, ".pnpm": true, ".yarn": true, ".cargo": true, ".rustup": true,
+		".docker": true, ".cursor": true, ".vscode": true, ".idea": true,
+		".gradle": true, ".m2": true, ".terraform": true, ".serverless": true,
+		"miniconda": true, "anaconda": true, ".conda": true, ".pyenv": true,
+		"venv": true, ".venv": true, "__pycache__": true, ".tox": true,
+		".mypy_cache": true, ".pytest_cache": true, "go": true, ".bun": true, ".deno": true,
+		"dist": true, "build": true, "target": true, "out": true,
+		".next": true, ".turbo": true, ".nuxt": true, ".svelte-kit": true,
+		"coverage": true, ".nyc_output": true,
+	}
+	separator := string(filepath.Separator)
+	const maxDepth = 4
+	_ = filepath.WalkDir(homeDir, func(path string, entry os.DirEntry, err error) error {
+		if err != nil || entry == nil {
+			return nil
+		}
+		if len(out) >= len(targets) {
+			return filepath.SkipAll
+		}
+		if path == homeDir || !entry.IsDir() {
+			return nil
+		}
+		if skip[entry.Name()] {
+			return filepath.SkipDir
+		}
+		consider(path)
+		depth := strings.Count(strings.TrimPrefix(path, homeDir), separator)
+		if depth >= maxDepth {
+			return filepath.SkipDir
+		}
+		return nil
+	})
+	return out
+}
+
+// geminiKnownProjectPaths returns project paths Gemini records in its config.
+// projects.json is {"projects": {path: name}}; trustedFolders.json is
+// {path: "TRUST_FOLDER"}. These are exact seeds but usually incomplete (only
+// named/trusted projects), so the filesystem walk fills in the rest.
+func geminiKnownProjectPaths(homeDir string) []string {
+	var paths []string
+	if data, err := os.ReadFile(filepath.Join(homeDir, ".gemini", "projects.json")); err == nil {
+		var wrapper struct {
+			Projects map[string]any `json:"projects"`
+		}
+		if json.Unmarshal(data, &wrapper) == nil {
+			for path := range wrapper.Projects {
+				paths = append(paths, path)
+			}
+		}
+	}
+	if data, err := os.ReadFile(filepath.Join(homeDir, ".gemini", "trustedFolders.json")); err == nil {
+		var flat map[string]any
+		if json.Unmarshal(data, &flat) == nil {
+			for path := range flat {
+				paths = append(paths, path)
+			}
+		}
+	}
+	return paths
+}
+
+func sha256Hex(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])
 }
 
 func findFileContaining(dir string, fragment string) (string, bool) {
