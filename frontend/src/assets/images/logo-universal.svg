@@ -1,0 +1,12 @@
+<svg width="1024" height="811" viewBox="0 0 1024 811" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="164" y1="96" x2="548" y2="576" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#2f2a26"/>
+      <stop offset="1" stop-color="#151312"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="112" y="86" width="492" height="492" rx="116" fill="url(#bg)"/>
+  <rect x="129" y="103" width="458" height="458" rx="99" stroke="#ffffff" stroke-opacity="0.08" stroke-width="3"/>
+  <text x="358" y="429" text-anchor="middle" fill="#FAFAF9" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="340" font-weight="900" letter-spacing="-16">c</text>
+</svg>
