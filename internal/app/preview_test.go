@@ -46,14 +46,17 @@ func TestExtractConversationMessagesFromClaudeJSONL(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if len(messages) != 2 {
-		t.Fatalf("expected 2 messages, got %d", len(messages))
+	if len(messages) != 3 {
+		t.Fatalf("expected 3 messages, got %d", len(messages))
 	}
 	if messages[0].Role != "user" || messages[0].Text != "hello claude" {
 		t.Fatalf("unexpected user message: %#v", messages[0])
 	}
-	if messages[1].Role != "assistant" || messages[1].Text != "hello user" {
-		t.Fatalf("unexpected assistant message: %#v", messages[1])
+	if messages[1].Role != "event" || messages[1].Type != "tool_use" || !messages[1].HiddenByDefault {
+		t.Fatalf("unexpected trace event: %#v", messages[1])
+	}
+	if messages[2].Role != "assistant" || messages[2].Text != "hello user" {
+		t.Fatalf("unexpected assistant message: %#v", messages[2])
 	}
 }
 

@@ -62,6 +62,18 @@ select {
     @apply mb-2 text-xs font-semibold uppercase tracking-normal text-app-muted;
   }
 
+  .segmented {
+    @apply inline-flex overflow-hidden rounded-md border border-app-line bg-app-bg p-0.5;
+  }
+
+  .segmented button {
+    @apply rounded px-3 py-1.5 text-xs font-medium text-app-muted transition hover:bg-app-surface hover:text-app-text;
+  }
+
+  .segmented button.active {
+    @apply bg-app-accentSoft text-app-text;
+  }
+
   .table-head {
     @apply px-3 py-2 font-medium;
   }

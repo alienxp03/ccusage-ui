@@ -1,4 +1,6 @@
-import {Fragment, type KeyboardEvent as ReactKeyboardEvent, useEffect, useMemo, useRef, useState} from "react";
+import {Component, Fragment, type ErrorInfo, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, useEffect, useMemo, useRef, useState} from "react";
+import {AssistantRuntimeProvider, useExternalStoreRuntime} from "@assistant-ui/react";
+import {Thread} from "./components/assistant-ui/thread";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {Bar, BarChart, CartesianGrid, Cell, ResponsiveContainer, Tooltip, XAxis, YAxis} from "recharts";
@@ -81,6 +83,28 @@ type ReportResponse = {
   generated: string;
 };
 
+type ActivityBreakdown = {
+  surface?: string;
+  toolName?: string;
+  provider?: string;
+  operation?: string;
+  calls: number;
+  errors: number;
+  inputChars: number;
+  outputChars: number;
+  estimatedTokens: number;
+  observedTokens: number;
+  estimatedCost: number;
+};
+
+type ActivitySummary = {
+  surfaces: ActivityBreakdown[] | null;
+  tools: ActivityBreakdown[] | null;
+  integrations: ActivityBreakdown[] | null;
+  operations: ActivityBreakdown[] | null;
+  totals: ActivityBreakdown;
+};
+
 type ProjectSummary = {
   projectPath: string;
   projectName: string;
@@ -97,6 +121,7 @@ type ProjectSummary = {
   totalTokens: number;
   totalCost: number;
   modelBreakdowns: ModelBreakdown[] | null;
+  activity: ActivitySummary;
   recentSessions: IndexedSession[] | null;
 };
 
@@ -122,6 +147,7 @@ type IndexedSession = {
   model: string;
   provider: string;
   reasoningLevel: string;
+  activity: ActivitySummary;
 };
 
 type SessionPreviewResponse = {
@@ -142,9 +168,16 @@ type SessionPreviewResponse = {
 };
 
 type ConversationMessage = {
+  id?: string;
+  parentId?: string;
   role: "user" | "assistant" | string;
+  type: string;
   timestamp: string;
   text: string;
+  toolName?: string;
+  toolCallId?: string;
+  isError?: boolean;
+  hiddenByDefault?: boolean;
 };
 
 type SessionConversationResponse = {
@@ -162,6 +195,31 @@ type SessionConversationResponse = {
   supported: boolean;
   unavailableHint: string;
 };
+
+class ErrorBoundary extends Component<{children: ReactNode}, {error: Error | null; errorInfo: ErrorInfo | null}> {
+  state: {error: Error | null; errorInfo: ErrorInfo | null} = {error: null, errorInfo: null};
+
+  static getDerivedStateFromError(error: Error) {
+    return {error, errorInfo: null};
+  }
+
+  componentDidCatch(error: Error, errorInfo: ErrorInfo) {
+    this.setState({error, errorInfo});
+  }
+
+  render() {
+    if (!this.state.error) return this.props.children;
+    return (
+      <div className="fixed inset-0 z-[60] overflow-auto bg-app-bg p-6 text-app-text">
+        <div className="rounded-lg border border-red-500/40 bg-red-950/20 p-4">
+          <div className="mb-2 text-lg font-semibold text-red-200">Conversation render error</div>
+          <pre className="whitespace-pre-wrap text-xs text-red-100">{this.state.error.stack || this.state.error.message}</pre>
+          {this.state.errorInfo?.componentStack ? <pre className="mt-4 whitespace-pre-wrap text-xs text-app-muted">{this.state.errorInfo.componentStack}</pre> : null}
+        </div>
+      </div>
+    );
+  }
+}
 
 type IndexGroup = {
   name: string;
@@ -268,7 +326,7 @@ function initialSource() {
 function App() {
   const initialPreset = initialDatePreset();
   const initialRange = dateRangeForPreset(initialPreset);
-  const [report, setReport] = useState<ReportKey>("daily");
+  const [report, setReport] = useState<ReportKey>("projects");
   const [source, setSource] = useState(initialSource);
   const [since, setSince] = useState(initialRange.since);
   const [until, setUntil] = useState(initialRange.until);
@@ -288,6 +346,7 @@ function App() {
   const [initialIndexing, setInitialIndexing] = useState(false);
   const [error, setError] = useState("");
   const [conversationSession, setConversationSession] = useState<IndexedSession | null>(null);
+  const [sessionDetail, setSessionDetail] = useState<IndexedSession | null>(null);
   const [conversation, setConversation] = useState<SessionConversationResponse | null>(null);
   const [conversationLoading, setConversationLoading] = useState(false);
   const [conversationError, setConversationError] = useState("");
@@ -382,6 +441,7 @@ function App() {
   const activeSelectedRow = report !== "projects" ? selectedRow : undefined;
   const activeSelectedProject = report === "projects" && indexGroupBy === "project" ? selectedProject : undefined;
   const activeSelectedIndexGroup = report === "projects" && indexGroupBy !== "project" ? selectedIndexGroup : undefined;
+  const showTopOverview = !(report === "projects" && activeSelectedProject);
 
   const totals = useMemo(() => {
     if (report === "projects") {
@@ -881,36 +941,38 @@ function App() {
             />
           ) : (
             <>
-          <div className="border-b border-app-line bg-app-bg/95 px-6 py-4">
-            {(report === "daily" || report === "weekly" || report === "monthly") && filteredRows.length > 0 ? (
-              <UsageTrendChart
-                rows={filteredRows}
-                report={report}
-                metric={usageChartMetric}
-                selectedIndex={selectedIndex}
-                noCost={noCost}
-                onMetricChange={setUsageChartMetric}
-                onSelect={setSelectedIndex}
-              />
-            ) : null}
-            {report === "projects" && (indexGroupBy === "project" ? filteredProjects.length > 0 : filteredIndexGroups.length > 0) ? (
-              <ProjectUsageChart
-                rows={indexGroupBy === "project" ? filteredProjects : filteredIndexGroups}
-                groupBy={indexGroupBy}
-                metric={projectChartMetric}
-                selectedIndex={selectedIndex}
-                noCost={noCost}
-                onMetricChange={setProjectChartMetric}
-                onSelect={setSelectedIndex}
-              />
-            ) : null}
-            <div className={(report === "daily" || report === "weekly" || report === "monthly" || report === "projects") && (filteredRows.length > 0 || filteredProjects.length > 0 || filteredIndexGroups.length > 0) ? "mt-4 grid grid-cols-4 gap-3" : "grid grid-cols-4 gap-3"}>
-              <Metric icon={DollarSign} label="Cost" value={formatCost(totals.totalCost, noCost)} />
-              <Metric icon={Command} label="Tokens" value={formatTokens(totals.totalTokens)} />
-              <Metric icon={Clock3} label="Input" value={formatTokens(totals.inputTokens)} />
-              <Metric icon={Activity} label="Output" value={formatTokens(totals.outputTokens)} />
+          {showTopOverview ? (
+            <div className="border-b border-app-line bg-app-bg/95 px-6 py-4">
+              {(report === "daily" || report === "weekly" || report === "monthly") && filteredRows.length > 0 ? (
+                <UsageTrendChart
+                  rows={filteredRows}
+                  report={report}
+                  metric={usageChartMetric}
+                  selectedIndex={selectedIndex}
+                  noCost={noCost}
+                  onMetricChange={setUsageChartMetric}
+                  onSelect={setSelectedIndex}
+                />
+              ) : null}
+              {report === "projects" && (indexGroupBy === "project" ? filteredProjects.length > 0 : filteredIndexGroups.length > 0) ? (
+                <ProjectUsageChart
+                  rows={indexGroupBy === "project" ? filteredProjects : filteredIndexGroups}
+                  groupBy={indexGroupBy}
+                  metric={projectChartMetric}
+                  selectedIndex={selectedIndex}
+                  noCost={noCost}
+                  onMetricChange={setProjectChartMetric}
+                  onSelect={setSelectedIndex}
+                />
+              ) : null}
+              <div className={(report === "daily" || report === "weekly" || report === "monthly" || report === "projects") && (filteredRows.length > 0 || filteredProjects.length > 0 || filteredIndexGroups.length > 0) ? "mt-4 grid grid-cols-4 gap-3" : "grid grid-cols-4 gap-3"}>
+                <Metric icon={DollarSign} label="Cost" value={formatCost(totals.totalCost, noCost)} />
+                <Metric icon={Command} label="Tokens" value={formatTokens(totals.totalTokens)} />
+                <Metric icon={Clock3} label="Input" value={formatTokens(totals.inputTokens)} />
+                <Metric icon={Activity} label="Output" value={formatTokens(totals.outputTokens)} />
+              </div>
             </div>
-          </div>
+          ) : null}
 
           {loading && !activeSelectedRow && !activeSelectedProject && !activeSelectedIndexGroup ? (
             <div className="grid h-full place-items-center px-6 text-center text-app-muted">
@@ -950,15 +1012,29 @@ function App() {
               </div>
 
               {activeSelectedProject ? (
-                <ProjectDetail
-                  project={activeSelectedProject}
-                  noCost={noCost}
-                  database={projectIndex?.database ?? ""}
-                  onOpenPath={(path) => void OpenProjectInFinder(path).catch((err) => setError(errorMessage(err)))}
-                  previewCache={sessionPreviewCache}
-                  onPreviewLoaded={cacheSessionPreview}
-                  onOpenSession={(session) => void openConversation(session)}
-                />
+                <>
+                  <ProjectDetail
+                    project={activeSelectedProject}
+                    noCost={noCost}
+                    database={projectIndex?.database ?? ""}
+                    onOpenPath={(path) => void OpenProjectInFinder(path).catch((err) => setError(errorMessage(err)))}
+                    previewCache={sessionPreviewCache}
+                    onPreviewLoaded={cacheSessionPreview}
+                    onOpenSession={(session) => void openConversation(session)}
+                    onOpenSessionDetail={setSessionDetail}
+                  />
+
+                  <ProjectOverviewSection
+                    rows={filteredProjects}
+                    groupBy={indexGroupBy}
+                    metric={projectChartMetric}
+                    selectedIndex={selectedIndex}
+                    totals={totals}
+                    noCost={noCost}
+                    onMetricChange={setProjectChartMetric}
+                    onSelect={setSelectedIndex}
+                  />
+                </>
               ) : null}
 
               {activeSelectedIndexGroup ? (
@@ -993,15 +1069,26 @@ function App() {
         </section>
       </div>
     </main>
-    {conversationSession ? (
-      <ConversationModal
-        session={conversationSession}
-        conversation={conversation}
-        loading={conversationLoading}
-        error={conversationError}
-        onClose={closeConversation}
-        onOpenSource={(path) => void OpenPathInFinder(path).catch((err) => setError(errorMessage(err)))}
+    {sessionDetail ? (
+      <SessionDetailModal
+        session={sessionDetail}
+        noCost={noCost}
+        onClose={() => setSessionDetail(null)}
+        onOpenSession={(session) => void openConversation(session)}
+        onOpenPath={(path) => void OpenPathInFinder(path).catch((err) => setError(errorMessage(err)))}
       />
+    ) : null}
+    {conversationSession ? (
+      <ErrorBoundary>
+        <ConversationModal
+          session={conversationSession}
+          conversation={conversation}
+          loading={conversationLoading}
+          error={conversationError}
+          onClose={closeConversation}
+          onOpenSource={(path) => void OpenPathInFinder(path).catch((err) => setError(errorMessage(err)))}
+        />
+      </ErrorBoundary>
     ) : null}
     </>
   );
@@ -1141,7 +1228,10 @@ function ConversationModal({
   onOpenSource: (path: string) => void;
 }) {
   const messages = conversation?.messages ?? [];
-  const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const [showFullTrace, setShowFullTrace] = useState(false);
+  const [showUsage, setShowUsage] = useState(false);
+  const visibleMessages = showFullTrace ? messages : messages.filter((message) => !message.hiddenByDefault || message.type === "toolCall");
+  const hiddenMessageCount = messages.length - visibleMessages.length;
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -1154,15 +1244,9 @@ function ConversationModal({
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [onClose]);
 
-  useEffect(() => {
-    if (!loading && messages.length > 0) {
-      requestAnimationFrame(() => messagesEndRef.current?.scrollIntoView({block: "end"}));
-    }
-  }, [loading, messages.length]);
-
   return (
-    <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 px-6 py-6">
-      <div className="flex max-h-full w-full max-w-5xl flex-col overflow-hidden rounded-lg border border-app-line bg-app-bg shadow-2xl">
+    <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 px-6 py-6" onClick={onClose}>
+      <div className="flex h-full max-h-full min-h-0 w-full max-w-5xl flex-col overflow-hidden rounded-lg border border-app-line bg-app-bg shadow-2xl" onClick={(event) => event.stopPropagation()}>
         <div className="flex items-start justify-between gap-4 border-b border-app-line bg-app-panel px-5 py-4">
           <div className="min-w-0">
             <div className="flex items-center gap-2 text-lg font-semibold">
@@ -1186,6 +1270,287 @@ function ConversationModal({
           </div>
         </div>
 
+        {messages.length > 0 ? (
+          <div className="flex items-center justify-between gap-3 border-b border-app-line bg-app-bg px-5 py-3 text-xs text-app-muted">
+            <span>
+              Showing {visibleMessages.length} of {messages.length} items{hiddenMessageCount > 0 && !showFullTrace ? ` · ${hiddenMessageCount} trace items hidden` : ""}
+            </span>
+            <label className="toggle">
+              <input type="checkbox" checked={showFullTrace} onChange={(event) => setShowFullTrace(event.target.checked)} />
+              Show full trace
+            </label>
+          </div>
+        ) : null}
+
+        <div className="min-h-0 flex-1 overflow-hidden">
+          {loading ? (
+            <div className="grid min-h-[360px] place-items-center text-sm text-app-muted">Loading conversation...</div>
+          ) : error ? (
+            <div className="px-5 py-5"><ErrorState message={error} /></div>
+          ) : conversation && !conversation.supported ? (
+            <div className="px-5 py-5"><EmptyState message={conversation.unavailableHint || "Conversation preview is not supported for this session."} /></div>
+          ) : messages.length === 0 ? (
+            <div className="px-5 py-5"><EmptyState message={conversation?.unavailableHint || "No conversation messages found."} /></div>
+          ) : visibleMessages.length === 0 ? (
+            <div className="px-5 py-5"><EmptyState message="Only hidden trace items found. Toggle full trace to view them." /></div>
+          ) : (
+            <AssistantUiTranscript messages={visibleMessages} />
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SessionDetailModal({
+  session,
+  noCost,
+  onClose,
+  onOpenSession,
+  onOpenPath,
+}: {
+  session: IndexedSession;
+  noCost: boolean;
+  onClose: () => void;
+  onOpenSession: (session: IndexedSession) => void;
+  onOpenPath: (path: string) => void;
+}) {
+  const [tab, setTab] = useState<"overview" | "activity">("overview");
+  const mcpRows = (session.activity?.operations ?? []).filter(isMcpActivityRow);
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") onClose();
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
+
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 px-6 py-6" onClick={onClose}>
+      <div className="flex max-h-full min-h-0 w-full max-w-5xl flex-col overflow-hidden rounded-lg border border-app-line bg-app-bg shadow-2xl" onClick={(event) => event.stopPropagation()}>
+        <div className="flex items-start justify-between gap-4 border-b border-app-line bg-app-panel px-5 py-4">
+          <div className="min-w-0">
+            <div className="text-lg font-semibold">Session details</div>
+            <div className="mt-1 truncate text-xs text-app-muted">
+              {session.agent}{session.model ? ` · ${session.model}` : ""}{session.reasoningLevel ? ` · ${session.reasoningLevel}` : ""} · {shortSessionId(session.sessionId)} · {formatDuration(session.activeDurationSeconds)} · {cleanProjectPath(session.projectPath)}
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            {session.messageSourcePath ? (
+              <button className="button" onClick={() => onOpenPath(session.messageSourcePath)}>
+                <FolderOpen size={15} />
+                Reveal transcript
+              </button>
+            ) : null}
+            <button className="button" onClick={() => onOpenSession(session)}>
+              <MessageSquare size={15} />
+              Conversation
+            </button>
+            <button className="icon-button" onClick={onClose} title="Close">
+              <X size={17} />
+            </button>
+          </div>
+        </div>
+
+        <div className="border-b border-app-line bg-app-bg px-5 py-3">
+          <div className="segmented w-fit">
+            {(["overview", "activity"] as const).map((key) => (
+              <button key={key} className={tab === key ? "active" : ""} onClick={() => setTab(key)}>
+                {key[0].toUpperCase() + key.slice(1)}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="min-h-0 overflow-y-auto px-5 py-4">
+          {tab === "overview" ? (
+            <div className="space-y-4">
+              <div className="grid grid-cols-4 gap-3">
+                <DetailStat label="Cost" value={formatCost(session.totalCost, noCost)} />
+                <DetailStat label="Total tokens" value={formatTokens(session.totalTokens)} />
+                <DetailStat label="Cache" value={formatTokens(session.cacheReadTokens + session.cacheCreationTokens)} />
+                <DetailStat label="Duration" value={formatDuration(session.activeDurationSeconds)} />
+              </div>
+              <div>
+                <h3 className="section-title">Last user message</h3>
+                <div className="rounded-md border border-app-line bg-app-surface px-3 py-2 text-sm text-app-text">
+                  {session.lastUserMessage || "No preview available."}
+                </div>
+              </div>
+              {mcpRows.length > 0 ? <McpBreakdownChart rows={mcpRows} noCost={noCost} /> : null}
+              <ModelBreakdownTable models={session.modelBreakdowns ?? []} noCost={noCost} />
+            </div>
+          ) : null}
+
+          {tab === "activity" ? <ActivityUsagePanel activity={session.activity} noCost={noCost} /> : null}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AssistantUiTranscript({messages}: {messages: ConversationMessage[]}) {
+  const runtimeMessages = useMemo(() => conversationMessagesToAssistantUi(messages) as any[], [messages]);
+  const runtime = useExternalStoreRuntime({
+    messages: runtimeMessages,
+    convertMessage: (message: any) => message,
+    onNew: async () => undefined,
+    isDisabled: true,
+  });
+
+  return (
+    <AssistantRuntimeProvider runtime={runtime}>
+      <Thread />
+    </AssistantRuntimeProvider>
+  );
+}
+
+function conversationMessagesToAssistantUi(messages: ConversationMessage[]) {
+  const generatedIdsByOriginal = new Map<string, string>();
+  return messages.map((message, index) => {
+    const originalId = message.id || `${message.timestamp}-${message.role}-${message.type}`;
+    const id = `${originalId}-${index}`;
+    if (message.id && !generatedIdsByOriginal.has(message.id)) {
+      generatedIdsByOriginal.set(message.id, id);
+    }
+    const createdAt = parseConversationDate(message.timestamp);
+    const parentId = message.parentId ? (generatedIdsByOriginal.get(message.parentId) ?? null) : null;
+    const common = {id, createdAt, parentId, metadata: {custom: {original: message}}};
+
+    if (message.role === "user") {
+      return {...common, role: "user", content: [{type: "text", text: message.text}], attachments: []};
+    }
+
+    if (message.role === "event") {
+      return {...common, role: "system", content: [{type: "text", text: message.text}]};
+    }
+
+    if (message.type === "thinking") {
+      return assistantUiAssistantMessage(common, [{type: "reasoning", text: message.text}]);
+    }
+
+    if (message.type === "toolCall") {
+      const {title, json} = splitTracePayload(message.text);
+      return assistantUiAssistantMessage(common, [{type: "tool-call", toolCallId: message.toolCallId || id, toolName: message.toolName || title || "tool", args: parseJSONOrText(json), argsText: json || ""}]);
+    }
+
+    if (message.role === "toolResult") {
+      return assistantUiAssistantMessage(common, [{type: "tool-call", toolCallId: message.toolCallId || id, toolName: message.toolName || "tool", args: {}, argsText: "", result: message.text, isError: message.isError}]);
+    }
+
+    if (message.type === "image") {
+      return assistantUiAssistantMessage(common, [{type: "text", text: "Image attachment"}]);
+    }
+
+    return assistantUiAssistantMessage(common, [{type: "text", text: message.text}]);
+  });
+}
+
+function assistantUiAssistantMessage(common: Record<string, unknown>, content: unknown[]) {
+  return {
+    ...common,
+    role: "assistant",
+    content,
+    status: {type: "complete", reason: "stop"},
+  };
+}
+
+function splitTracePayload(text: string) {
+  const [title, ...rest] = text.split("\n");
+  return {title: title.trim(), json: rest.join("\n").trim()};
+}
+
+function parseJSONOrText(value: string) {
+  if (!value) return {};
+  try {
+    return JSON.parse(value);
+  } catch {
+    return {text: value};
+  }
+}
+
+function parseConversationDate(value: string) {
+  const time = Date.parse(value);
+  return Number.isNaN(time) ? new Date() : new Date(time);
+}
+
+function LegacyConversationModal({
+  session,
+  conversation,
+  loading,
+  error,
+  onClose,
+  onOpenSource,
+}: {
+  session: IndexedSession;
+  conversation: SessionConversationResponse | null;
+  loading: boolean;
+  error: string;
+  onClose: () => void;
+  onOpenSource: (path: string) => void;
+}) {
+  const messages = conversation?.messages ?? [];
+  const [showFullTrace, setShowFullTrace] = useState(false);
+  const visibleMessages = showFullTrace ? messages : messages.filter((message) => !message.hiddenByDefault);
+  const hiddenMessageCount = messages.length - visibleMessages.length;
+  const messagesEndRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        onClose();
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
+
+  useEffect(() => {
+    if (!loading && visibleMessages.length > 0) {
+      requestAnimationFrame(() => messagesEndRef.current?.scrollIntoView({block: "end"}));
+    }
+  }, [loading, visibleMessages.length]);
+
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 px-6 py-6" onClick={onClose}>
+      <div className="flex max-h-full w-full max-w-5xl flex-col overflow-hidden rounded-lg border border-app-line bg-app-bg shadow-2xl" onClick={(event) => event.stopPropagation()}>
+        <div className="flex items-start justify-between gap-4 border-b border-app-line bg-app-panel px-5 py-4">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2 text-lg font-semibold">
+              <MessageSquare size={18} />
+              Conversation
+            </div>
+            <div className="mt-1 truncate text-xs text-app-muted">
+              {session.agent}{conversationClientLabel(conversation, session) ? ` · ${conversationClientLabel(conversation, session)}` : ""}{conversationModelLabel(conversation, session) ? ` · ${conversationModelLabel(conversation, session)}` : ""} · {shortSessionId(session.sessionId)} · Duration {formatDuration(conversation?.activeDurationSeconds || session.activeDurationSeconds)} · {cleanProjectPath(session.projectPath)}
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            {conversation?.sourcePath ? (
+              <button className="button" onClick={() => onOpenSource(conversation.sourcePath)}>
+                <FolderOpen size={15} />
+                Reveal transcript
+              </button>
+            ) : null}
+            <button className="icon-button" onClick={onClose} title="Close">
+              <X size={17} />
+            </button>
+          </div>
+        </div>
+
+        {messages.length > 0 ? (
+          <div className="flex items-center justify-between gap-3 border-b border-app-line bg-app-bg px-5 py-3 text-xs text-app-muted">
+            <span>
+              Showing {visibleMessages.length} of {messages.length} items{hiddenMessageCount > 0 && !showFullTrace ? ` · ${hiddenMessageCount} trace items hidden` : ""}
+            </span>
+            <label className="toggle">
+              <input type="checkbox" checked={showFullTrace} onChange={(event) => setShowFullTrace(event.target.checked)} />
+              Show full trace
+            </label>
+          </div>
+        ) : null}
+
         <div className="min-h-[420px] flex-1 overflow-y-auto px-5 py-5">
           {loading ? (
             <div className="grid min-h-[360px] place-items-center text-sm text-app-muted">Loading conversation...</div>
@@ -1195,10 +1560,12 @@ function ConversationModal({
             <EmptyState message={conversation.unavailableHint || "Conversation preview is not supported for this session."} />
           ) : messages.length === 0 ? (
             <EmptyState message={conversation?.unavailableHint || "No conversation messages found."} />
+          ) : visibleMessages.length === 0 ? (
+            <EmptyState message="Only hidden trace items found. Toggle full trace to view them." />
           ) : (
             <div className="space-y-4">
-              {messages.map((message, index) => (
-                <ConversationBubble key={`${message.timestamp}-${message.role}-${index}`} message={message} />
+              {visibleMessages.map((message, index) => (
+                <ConversationBubble key={`${message.timestamp}-${message.role}-${message.type}-${index}`} message={message} />
               ))}
               <div ref={messagesEndRef} />
             </div>
@@ -1211,24 +1578,71 @@ function ConversationModal({
 
 function ConversationBubble({message}: {message: ConversationMessage}) {
   const isUser = message.role === "user";
+  const isInfo = message.role === "event" && !message.hiddenByDefault;
+  const isTrace = message.hiddenByDefault || message.role === "toolResult" || message.role === "event" || message.type === "toolCall" || message.type === "thinking";
+  const label = conversationMessageLabel(message);
+  if (isInfo) {
+    return (
+      <div className="flex justify-center text-xs italic text-app-muted">
+        <span>{message.text}</span>
+      </div>
+    );
+  }
   return (
-    <article className={["flex", isUser ? "justify-end" : "justify-start"].join(" ")}>
+    <article className={["flex", isUser ? "justify-end" : "justify-start", message.parentId ? "pl-6" : ""].join(" ")}>
       <div
         className={[
           "max-w-[82%] rounded-lg border px-4 py-3",
-          isUser ? "border-app-accent/40 bg-app-accentSoft/70" : "border-app-line bg-app-surface",
+          isUser
+            ? "border-app-accent/40 bg-app-accentSoft/70"
+            : isTrace
+              ? message.isError
+                ? "border-red-500/35 bg-red-950/20"
+                : "border-app-line bg-app-panel/60"
+              : "border-app-line bg-app-surface",
         ].join(" ")}
       >
         <div className="mb-2 flex items-center justify-between gap-3 text-xs text-app-muted">
-          <span className="font-semibold uppercase tracking-normal text-app-text">{isUser ? "You" : "Assistant"}</span>
+          <span className={["font-semibold tracking-normal text-app-text", isTrace ? "" : "uppercase"].join(" ")}>{label}</span>
           <span>{formatConversationDateTime(message.timestamp)}</span>
         </div>
-        <div className="markdown-body text-sm leading-6 text-app-text">
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.text}</ReactMarkdown>
+        <div className={["markdown-body text-sm leading-6", isTrace ? "text-app-muted" : "text-app-text"].join(" ")}>
+          <ReactMarkdown remarkPlugins={[remarkGfm]}>{formatConversationMessageText(message)}</ReactMarkdown>
         </div>
       </div>
     </article>
   );
+}
+
+function conversationMessageLabel(message: ConversationMessage) {
+  if (message.role === "user") return "You";
+  if (message.role === "assistant" && message.type === "thinking") return "Thinking";
+  if (message.role === "assistant" && message.type === "toolCall") return `Tool call${message.toolName ? ` · ${message.toolName}` : ""}`;
+  if (message.role === "toolResult") return `Tool result${message.toolName ? ` · ${message.toolName}` : ""}${message.isError ? " · error" : ""}`;
+  if (message.role === "event") return conversationEventLabel(message.type);
+  if (message.type === "image") return "Image";
+  return "Assistant";
+}
+
+function conversationEventLabel(type: string) {
+  switch (type) {
+    case "session":
+      return "Session";
+    case "model_change":
+      return "model";
+    case "thinking_level_change":
+      return "thinking level";
+    default:
+      return "Event";
+  }
+}
+
+function formatConversationMessageText(message: ConversationMessage) {
+  if ((message.type === "toolCall" || message.role === "toolResult") && message.text.includes("\n")) {
+    const [title, ...rest] = message.text.split("\n");
+    return `${title}\n\n\`\`\`\n${rest.join("\n")}\n\`\`\``;
+  }
+  return message.text;
 }
 
 const usageChartMetrics: {key: UsageChartMetric; label: string}[] = [
@@ -1463,6 +1877,7 @@ function ProjectDetail({
   database,
   onOpenPath,
   onOpenSession,
+  onOpenSessionDetail,
   previewCache,
   onPreviewLoaded,
 }: {
@@ -1471,6 +1886,7 @@ function ProjectDetail({
   database: string;
   onOpenPath: (path: string) => void;
   onOpenSession: (session: IndexedSession) => void;
+  onOpenSessionDetail: (session: IndexedSession) => void;
   previewCache: Record<string, SessionPreviewResponse>;
   onPreviewLoaded: (session: IndexedSession, preview: SessionPreviewResponse) => void;
 }) {
@@ -1480,52 +1896,47 @@ function ProjectDetail({
 
   return (
     <>
-      <div className="grid grid-cols-4 gap-3">
-        <DetailStat label="Cost" value={formatCost(project.totalCost, noCost)} />
-        <DetailStat label="Sessions" value={String(project.sessionCount)} />
-        <DetailStat label="Total tokens" value={formatTokens(project.totalTokens)} />
-        <DetailStat label="Cache read" value={formatTokens(project.cacheReadTokens)} />
-      </div>
-
-      <div className="mt-4">
-        <div className="mb-2 flex items-center justify-between gap-3">
-          <div className="min-w-0">
-            <div className="flex items-center gap-2">
-              <h3 className="section-title mb-0">Path</h3>
-              {project.pathExists ? (
-                <button className="icon-button h-7 w-7" title="Reveal in Finder" onClick={() => onOpenPath(project.projectPath)}>
-                  <FolderOpen size={13} />
-                </button>
-              ) : null}
-            </div>
-            {hasGroupedPaths ? (
-              <div className="mt-1 text-xs text-app-muted">
-                {physicalPathCount} physical paths grouped by {project.groupingRule || "grouping rule"}
-              </div>
-            ) : !project.pathExists ? (
-              <div className="mt-1 text-xs text-app-muted">This folder no longer exists on disk.</div>
-            ) : null}
+      <div className="mb-4 rounded-md border border-app-line bg-app-surface px-3 py-3">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm">
+          <span className="font-semibold">{formatCost(project.totalCost, noCost)}</span>
+          <span className="text-app-muted">{project.sessionCount} {project.sessionCount === 1 ? "session" : "sessions"}</span>
+          <span className="text-app-muted">{formatTokens(project.totalTokens)} tokens</span>
+          <span className="text-app-muted">{formatTokens(project.cacheReadTokens)} cache read</span>
+          <div className="flex flex-wrap gap-1.5">
+            <AgentNameChips agents={project.agents ?? ["unknown"]} />
           </div>
+        </div>
+
+        <div className="mt-2 flex min-w-0 items-center gap-2">
+          <span className="shrink-0 text-xs font-semibold uppercase tracking-wide text-app-muted">Path</span>
+          <code className="min-w-0 flex-1 truncate rounded border border-app-line bg-app-bg px-2 py-1 text-xs text-app-muted">
+            {cleanProjectPath(project.projectPath)}
+          </code>
+          {project.pathExists ? (
+            <button className="icon-button h-7 w-7 shrink-0" title="Reveal in Finder" onClick={() => onOpenPath(project.projectPath)}>
+              <FolderOpen size={13} />
+            </button>
+          ) : null}
           {hasGroupedPaths ? (
-            <button className="button h-8" onClick={() => setShowPhysicalPaths(true)}>
-              View paths
+            <button className="button h-7 shrink-0 px-2 text-xs" onClick={() => setShowPhysicalPaths(true)}>
+              {physicalPathCount} paths
             </button>
           ) : null}
         </div>
-        <code className="block overflow-x-auto rounded-md border border-app-line bg-app-surface px-3 py-2 text-xs text-app-muted">
-          {cleanProjectPath(project.projectPath)}
-        </code>
-      </div>
 
-      <div className="mt-4">
-        <h3 className="section-title">Agents</h3>
-        <div className="flex flex-wrap gap-2">
-          <AgentNameChips agents={project.agents ?? ["unknown"]} />
-        </div>
+        {hasGroupedPaths ? (
+          <div className="mt-1 text-xs text-app-muted">Grouped by {project.groupingRule || "grouping rule"}</div>
+        ) : !project.pathExists ? (
+          <div className="mt-1 text-xs text-app-muted">This folder no longer exists on disk.</div>
+        ) : null}
       </div>
 
       {showPhysicalPaths ? (
         <PhysicalPathsModal project={project} onClose={() => setShowPhysicalPaths(false)} onOpenPath={onOpenPath} />
+      ) : null}
+
+      {(project.activity?.operations ?? []).filter(isMcpActivityRow).length > 0 ? (
+        <McpBreakdownChart rows={(project.activity?.operations ?? []).filter(isMcpActivityRow)} noCost={noCost} />
       ) : null}
 
       <RecentSessionsTable
@@ -1534,11 +1945,277 @@ function ProjectDetail({
         previewCache={previewCache}
         onPreviewLoaded={onPreviewLoaded}
         onOpenSession={onOpenSession}
+        onOpenSessionDetail={onOpenSessionDetail}
         onOpenPath={onOpenPath}
       />
 
       <ModelBreakdownTable models={project.modelBreakdowns ?? []} noCost={noCost} />
     </>
+  );
+}
+
+function ActivityUsagePanel({activity, noCost}: {activity?: ActivitySummary; noCost: boolean}) {
+  const [view, setView] = useState<"surfaces" | "tools" | "integrations" | "operations">("surfaces");
+  const rows = (activity?.[view] ?? []).slice(0, 8);
+  const mcpRows = (activity?.operations ?? []).filter(isMcpActivityRow).slice(0, 8);
+  const totals = activity?.totals;
+  if (!totals || totals.calls === 0) return null;
+
+  return (
+    <div className="mt-4 rounded-md border border-app-line bg-app-surface p-3">
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <div className="text-xs text-app-muted">
+          {totals.calls} calls · ~{formatTokens(totals.estimatedTokens)} tokens · ~{formatCost(totals.estimatedCost, noCost)} cost share
+        </div>
+        <div className="segmented w-auto">
+          {(["surfaces", "tools", "integrations", "operations"] as const).map((key) => (
+            <button key={key} className={view === key ? "active" : ""} onClick={() => setView(key)}>
+              {key === "surfaces" ? "Surface" : key === "tools" ? "Tools" : key === "integrations" ? "Integrations" : "Ops"}
+            </button>
+          ))}
+        </div>
+      </div>
+      <ActivityBreakdownTable rows={rows} view={view} noCost={noCost} />
+
+      {mcpRows.length > 0 ? <McpBreakdownChart rows={mcpRows} noCost={noCost} /> : null}
+    </div>
+  );
+}
+
+const mcpSegmentColors = [
+  "rgb(var(--color-accent))",
+  "#f59e0b",
+  "#22c55e",
+  "#38bdf8",
+  "#a78bfa",
+];
+
+function McpBreakdownChart({rows, noCost}: {rows: ActivityBreakdown[]; noCost: boolean}) {
+  const data = buildMcpStackedChartData(rows);
+
+  return (
+    <section className="mt-3 rounded-md border border-app-line bg-app-bg px-3 py-3">
+      <div className="mb-2 flex items-start justify-between gap-3">
+        <div>
+          <div className="text-xs font-semibold uppercase tracking-wide text-app-muted">MCP breakdown</div>
+          <div className="mt-1 text-xs text-app-muted">Top MCP servers, split by operation</div>
+        </div>
+      </div>
+      <div style={{height: Math.max(90, data.length * 30 + 30)}}>
+        <ResponsiveContainer width="100%" height="100%">
+          <BarChart data={data} layout="vertical" margin={{top: 2, right: 8, bottom: 0, left: 8}}>
+            <CartesianGrid stroke="rgb(var(--color-line))" strokeOpacity={0.3} horizontal={false} />
+            <XAxis
+              type="number"
+              axisLine={false}
+              tickLine={false}
+              tick={{fill: "rgb(var(--color-muted))", fontSize: 10}}
+              tickFormatter={(value) => formatTokens(Number(value))}
+            />
+            <YAxis
+              type="category"
+              dataKey="label"
+              axisLine={false}
+              tickLine={false}
+              tick={{fill: "rgb(var(--color-muted))", fontSize: 10}}
+              width={210}
+            />
+            <Tooltip
+              cursor={{fill: "rgb(var(--color-accent-soft))", opacity: 0.2}}
+              content={({active, payload, label}) => {
+                if (!active || !payload?.length) return null;
+                const row = payload[0].payload as McpStackedChartRow;
+                const details = Object.entries(row.details).filter(([, detail]) => detail.estimatedTokens > 0 || detail.calls > 0);
+                return (
+                  <div className="max-w-sm rounded-md border border-app-line bg-app-bg px-3 py-2 text-xs shadow-xl">
+                    <div className="font-medium text-app-text">{label}</div>
+                    <div className="mt-2 space-y-1">
+                      {details.map(([key, detail]) => (
+                        <div key={key} className="flex items-start gap-2">
+                          <span className="mt-1 h-2 w-2 shrink-0 rounded-sm" style={{background: mcpSegmentColors[Number(key.replace("segment", ""))]}} />
+                          <div className="min-w-0">
+                            <div className="truncate text-app-text">{detail.label}</div>
+                            <div className="text-app-muted">{detail.calls} calls · ~{formatTokens(detail.estimatedTokens)} · ~{formatCost(detail.estimatedCost, noCost)}{detail.errors ? ` · ${detail.errors} errors` : ""}</div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              }}
+            />
+            {mcpSegmentColors.map((color, index) => (
+              <Bar key={index} dataKey={`segment${index}`} stackId="mcp" radius={index === mcpSegmentColors.length - 1 ? [0, 4, 4, 0] : [0, 0, 0, 0]} fill={color} />
+            ))}
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+      <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-app-muted">
+        {mcpSegmentColors.map((color, index) => (
+          <span key={color} className="inline-flex items-center gap-1">
+            <span className="h-2 w-2 rounded-sm" style={{background: color}} />
+            {index < 4 ? `Top ${index + 1}` : "Other"}
+          </span>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+type McpStackedChartRow = {
+  label: string;
+  segment0: number;
+  segment1: number;
+  segment2: number;
+  segment3: number;
+  segment4: number;
+  details: Record<string, ActivityBreakdown & {label: string}>;
+};
+
+function buildMcpStackedChartData(rows: ActivityBreakdown[]): McpStackedChartRow[] {
+  const grouped = new Map<string, ActivityBreakdown[]>();
+  for (const row of rows) {
+    const provider = row.provider || row.toolName || row.operation || row.surface || "unknown";
+    grouped.set(provider, [...(grouped.get(provider) ?? []), row]);
+  }
+
+  return [...grouped.entries()]
+    .map(([provider, providerRows]) => {
+      const operations = providerRows
+        .map((row) => ({...row, label: row.operation || row.toolName || "unknown"}))
+        .sort((a, b) => {
+          if (a.estimatedTokens === b.estimatedTokens) return b.calls - a.calls;
+          return b.estimatedTokens - a.estimatedTokens;
+        });
+      const top = operations.slice(0, 4);
+      const other = operations.slice(4).reduce<ActivityBreakdown & {label: string}>(
+        (acc, row) => ({
+          ...acc,
+          calls: acc.calls + row.calls,
+          errors: acc.errors + row.errors,
+          inputChars: acc.inputChars + row.inputChars,
+          outputChars: acc.outputChars + row.outputChars,
+          estimatedTokens: acc.estimatedTokens + row.estimatedTokens,
+          observedTokens: acc.observedTokens + row.observedTokens,
+          estimatedCost: acc.estimatedCost + row.estimatedCost,
+        }),
+        {label: "Other", calls: 0, errors: 0, inputChars: 0, outputChars: 0, estimatedTokens: 0, observedTokens: 0, estimatedCost: 0},
+      );
+      const segments = [...top, other];
+      return {
+        label: provider,
+        segment0: segments[0]?.estimatedTokens ?? 0,
+        segment1: segments[1]?.estimatedTokens ?? 0,
+        segment2: segments[2]?.estimatedTokens ?? 0,
+        segment3: segments[3]?.estimatedTokens ?? 0,
+        segment4: segments[4]?.estimatedTokens ?? 0,
+        details: Object.fromEntries(segments.map((segment, index) => [`segment${index}`, segment])),
+      };
+    })
+    .sort((a, b) => {
+      const aTotal = a.segment0 + a.segment1 + a.segment2 + a.segment3 + a.segment4;
+      const bTotal = b.segment0 + b.segment1 + b.segment2 + b.segment3 + b.segment4;
+      return bTotal - aTotal;
+    })
+    .slice(0, 8);
+}
+
+function ActivityBreakdownTable({
+  rows,
+  view,
+  noCost,
+}: {
+  rows: ActivityBreakdown[];
+  view: "surfaces" | "tools" | "integrations" | "operations";
+  noCost: boolean;
+}) {
+  return (
+    <div className="overflow-hidden rounded-md border border-app-line bg-app-bg">
+      <table className="w-full text-sm">
+        <thead className="border-b border-app-line bg-app-panel text-xs text-app-muted">
+          <tr>
+            <th className="table-head">Name</th>
+            <th className="table-head text-right">Calls</th>
+            <th className="table-head text-right">Est tokens</th>
+            <th className="table-head text-right">Est cost</th>
+            <th className="table-head text-right">Errors</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row, index) => (
+            <tr key={`${activityRowLabel(row, view)}-${index}`} className="border-b border-app-line/70 last:border-0">
+              <td className="table-cell font-medium">
+                <div className="truncate">{activityRowLabel(row, view)}</div>
+                {view === "operations" && row.provider ? <div className="mt-0.5 text-xs text-app-muted">{row.provider}</div> : null}
+              </td>
+              <td className="table-cell text-right">{row.calls}</td>
+              <td className="table-cell text-right">~{formatTokens(row.estimatedTokens)}</td>
+              <td className="table-cell text-right">~{formatCost(row.estimatedCost, noCost)}</td>
+              <td className="table-cell text-right">{row.errors || "—"}</td>
+            </tr>
+          ))}
+          {rows.length === 0 ? (
+            <tr>
+              <td className="table-cell text-app-muted" colSpan={5}>No activity found.</td>
+            </tr>
+          ) : null}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function isMcpActivityRow(row: ActivityBreakdown) {
+  return row.surface === "mcp" || row.toolName === "mcp";
+}
+
+function activityRowLabel(row: ActivityBreakdown, view: "surfaces" | "tools" | "integrations" | "operations") {
+  if (view === "surfaces") return row.surface || "unknown";
+  if (view === "tools") return row.toolName || row.surface || "tool";
+  if (view === "integrations") return row.provider || row.toolName || "integration";
+  return row.operation || row.toolName || row.provider || "operation";
+}
+
+function ProjectOverviewSection({
+  rows,
+  groupBy,
+  metric,
+  selectedIndex,
+  totals,
+  noCost,
+  onMetricChange,
+  onSelect,
+}: {
+  rows: ProjectSummary[];
+  groupBy: IndexGroupBy;
+  metric: ProjectChartMetric;
+  selectedIndex: number;
+  totals: Pick<IndexedAggregate, "totalCost" | "totalTokens" | "inputTokens" | "outputTokens">;
+  noCost: boolean;
+  onMetricChange: (metric: ProjectChartMetric) => void;
+  onSelect: (index: number) => void;
+}) {
+  if (rows.length === 0) return null;
+
+  return (
+    <div className="mt-6 border-t border-app-line pt-5">
+      <h3 className="section-title">Project analytics</h3>
+      <ProjectUsageChart
+        rows={rows}
+        groupBy={groupBy}
+        metric={metric}
+        selectedIndex={selectedIndex}
+        noCost={noCost}
+        onMetricChange={onMetricChange}
+        onSelect={onSelect}
+      />
+      <div className="mt-4 grid grid-cols-4 gap-3">
+        <Metric icon={DollarSign} label="Cost" value={formatCost(totals.totalCost, noCost)} />
+        <Metric icon={Command} label="Tokens" value={formatTokens(totals.totalTokens)} />
+        <Metric icon={Clock3} label="Input" value={formatTokens(totals.inputTokens)} />
+        <Metric icon={Activity} label="Output" value={formatTokens(totals.outputTokens)} />
+      </div>
+    </div>
   );
 }
 
@@ -1565,8 +2242,8 @@ function PhysicalPathsModal({
   }, [onClose]);
 
   return (
-    <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 px-6 py-6">
-      <div className="flex max-h-full w-full max-w-4xl flex-col overflow-hidden rounded-lg border border-app-line bg-app-bg shadow-2xl">
+    <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 px-6 py-6" onClick={onClose}>
+      <div className="flex max-h-full w-full max-w-4xl flex-col overflow-hidden rounded-lg border border-app-line bg-app-bg shadow-2xl" onClick={(event) => event.stopPropagation()}>
         <div className="flex items-start justify-between gap-4 border-b border-app-line bg-app-panel px-5 py-4">
           <div className="min-w-0">
             <div className="text-lg font-semibold">Physical paths</div>
@@ -1671,6 +2348,7 @@ function RecentSessionsTable({
   previewCache,
   onPreviewLoaded,
   onOpenSession,
+  onOpenSessionDetail,
   onOpenPath,
 }: {
   sessions: IndexedSession[];
@@ -1678,9 +2356,9 @@ function RecentSessionsTable({
   previewCache: Record<string, SessionPreviewResponse>;
   onPreviewLoaded: (session: IndexedSession, preview: SessionPreviewResponse) => void;
   onOpenSession: (session: IndexedSession) => void;
+  onOpenSessionDetail: (session: IndexedSession) => void;
   onOpenPath: (path: string) => void;
 }) {
-  const [expandedModels, setExpandedModels] = useState<Record<string, boolean>>({});
   const [sessionSort, setSessionSort] = useState<SortField>("lastActivity");
   const [pageSize, setPageSize] = useState(10);
   const [page, setPage] = useState(0);
@@ -1694,13 +2372,8 @@ function RecentSessionsTable({
     setPage(0);
   }, [sessions, sessionSort, pageSize]);
 
-  function toggleModels(session: IndexedSession) {
-    const key = sessionPreviewKey(session);
-    setExpandedModels((current) => ({...current, [key]: !current[key]}));
-  }
-
   return (
-    <div className="mt-6">
+    <div className="mt-4">
       <div className="mb-2 flex items-center justify-between gap-3">
         <h3 className="section-title mb-0">Sessions</h3>
         <div className="flex items-center gap-2 text-xs text-app-muted">
@@ -1723,76 +2396,35 @@ function RecentSessionsTable({
             <tr>
               <th className="table-head">Agent</th>
               <th className="table-head">Last User Message</th>
-              <th className="table-head text-right">Input</th>
-              <th className="table-head text-right">Output</th>
-              <th className="table-head text-right">Cache</th>
               <th className="table-head text-right">Cost</th>
-              <th className="table-head text-right">Duration</th>
               <th className="table-head text-right">Last activity</th>
-              <th className="table-head text-right">View</th>
             </tr>
           </thead>
           <tbody>
             {pagedSessions.map((session) => {
               const key = sessionPreviewKey(session);
-              const sourcePath = previewCache[key]?.sourcePath || session.messageSourcePath;
-              const models = session.modelBreakdowns ?? [];
-              const modelsExpanded = expandedModels[key];
               return (
               <Fragment key={`${session.agent}-${session.sessionId}`}>
-              <tr className="border-b border-app-line/70 last:border-0">
+              <tr className="cursor-pointer border-b border-app-line/70 transition hover:bg-app-panel/60 last:border-0" onClick={() => onOpenSessionDetail(session)}>
                 <td className="table-cell">
                   <SessionAgentCell session={session} cachedPreview={previewCache[sessionPreviewKey(session)]} />
                 </td>
-                <td className="table-cell max-w-[360px]" title={session.sessionId}>
+                <td className="table-cell max-w-[360px] lg:max-w-[460px]" title={session.sessionId}>
                   <SessionPreviewText
                     session={session}
                     cachedPreview={previewCache[sessionPreviewKey(session)]}
                     onPreviewLoaded={(preview) => onPreviewLoaded(session, preview)}
                   />
                 </td>
-                <td className="table-cell text-right text-app-muted">{formatTokens(session.inputTokens)}</td>
-                <td className="table-cell text-right text-app-muted">{formatTokens(session.outputTokens)}</td>
-                <td
-                  className="table-cell text-right text-app-muted"
-                  title={`Read: ${formatTokens(session.cacheReadTokens)} · Create: ${formatTokens(session.cacheCreationTokens)}`}
-                >
-                  {formatTokens(session.cacheReadTokens + session.cacheCreationTokens)}
-                </td>
-                <td className="table-cell text-right">{formatCost(session.totalCost, noCost)}</td>
-                <td className="table-cell text-right text-app-muted">
-                  {formatDuration(previewCache[sessionPreviewKey(session)]?.activeDurationSeconds || session.activeDurationSeconds)}
-                </td>
-                <td className="table-cell text-right text-app-muted">{formatDateTime(session.lastActivity)}</td>
-                <td className="table-cell text-right">
-                  <div className="flex justify-end gap-1.5">
-                    {models.length > 1 ? (
-                      <button
-                        className={["button h-7 px-2 text-xs", modelsExpanded ? "bg-app-accentSoft" : ""].join(" ")}
-                        title="Show model breakdown"
-                        onClick={() => toggleModels(session)}
-                      >
-                        Models
-                      </button>
-                    ) : null}
-                    {sourcePath ? (
-                      <button className="icon-button h-7 w-7" title="Reveal transcript in Finder" onClick={() => onOpenPath(sourcePath)}>
-                        <FolderOpen size={13} />
-                      </button>
-                    ) : null}
-                    <button className="icon-button h-7 w-7" title="View conversation" onClick={() => onOpenSession(session)}>
-                      <MessageSquare size={13} />
-                    </button>
-                  </div>
-                </td>
+                <td className="table-cell whitespace-nowrap text-right">{formatCost(session.totalCost, noCost)}</td>
+                <td className="table-cell whitespace-nowrap text-right text-app-muted">{formatDateTime(session.lastActivity)}</td>
               </tr>
-              {modelsExpanded ? <SessionModelBreakdownRow models={models} noCost={noCost} /> : null}
               </Fragment>
             );
             })}
             {sortedSessions.length === 0 ? (
               <tr>
-                <td className="table-cell text-app-muted" colSpan={9}>
+                <td className="table-cell text-app-muted" colSpan={4}>
                   No indexed sessions available.
                 </td>
               </tr>
@@ -1816,44 +2448,6 @@ function RecentSessionsTable({
         </div>
       ) : null}
     </div>
-  );
-}
-
-function SessionModelBreakdownRow({models, noCost}: {models: ModelBreakdown[]; noCost: boolean}) {
-  return (
-    <tr className="border-b border-app-line/70 bg-app-bg/40">
-      <td className="table-cell" colSpan={9}>
-        <div className="rounded-md border border-app-line bg-app-surface">
-          <table className="w-full text-xs">
-            <thead className="border-b border-app-line bg-app-panel text-app-muted">
-              <tr>
-                <th className="table-head">Model</th>
-                <th className="table-head text-right">Input</th>
-                <th className="table-head text-right">Output</th>
-                <th className="table-head text-right">Cache</th>
-                <th className="table-head text-right">Cost</th>
-              </tr>
-            </thead>
-            <tbody>
-              {models.map((model) => (
-                <tr key={model.modelName} className="border-b border-app-line/60 last:border-0">
-                  <td className="table-cell font-medium">{model.modelName}</td>
-                  <td className="table-cell text-right text-app-muted">{formatTokens(model.inputTokens)}</td>
-                  <td className="table-cell text-right text-app-muted">{formatTokens(model.outputTokens)}</td>
-                  <td
-                    className="table-cell text-right text-app-muted"
-                    title={`Read: ${formatTokens(model.cacheReadTokens)} · Create: ${formatTokens(model.cacheCreationTokens)}`}
-                  >
-                    {formatTokens(model.cacheReadTokens + model.cacheCreationTokens)}
-                  </td>
-                  <td className="table-cell text-right">{formatCost(model.cost, noCost)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </td>
-    </tr>
   );
 }
 

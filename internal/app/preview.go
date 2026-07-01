@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -55,9 +56,16 @@ type SessionConversationResponse struct {
 }
 
 type ConversationMessage struct {
-	Role      string `json:"role"`
-	Timestamp string `json:"timestamp"`
-	Text      string `json:"text"`
+	ID              string `json:"id,omitempty"`
+	ParentID        string `json:"parentId,omitempty"`
+	Role            string `json:"role"`
+	Type            string `json:"type"`
+	Timestamp       string `json:"timestamp"`
+	Text            string `json:"text"`
+	ToolName        string `json:"toolName,omitempty"`
+	ToolCallID      string `json:"toolCallId,omitempty"`
+	IsError         bool   `json:"isError,omitempty"`
+	HiddenByDefault bool   `json:"hiddenByDefault"`
 }
 
 type TranscriptMetadata struct {
@@ -643,7 +651,6 @@ func lastTimestampInJSONL(path string) string {
 	return latest
 }
 
-
 // resolveGeminiProjectPaths maps Gemini project identifiers back to their
 // absolute path. Gemini stores projects under ~/.gemini/tmp/<id>/ where <id> is
 // either SHA-256(path) for unnamed projects or the project name for named ones
@@ -888,13 +895,36 @@ func extractConversationMessages(path string) ([]ConversationMessage, error) {
 	scanner.Buffer(make([]byte, 0, 1024*1024), 16*1024*1024)
 
 	messages := []ConversationMessage{}
-	for scanner.Scan() {
-		message := extractConversationMessageFromJSONLine(scanner.Bytes())
-		if message.Text == "" {
-			continue
+	pendingModelEvents := map[string]ConversationMessage{}
+	flushPendingModels := func() {
+		for id, message := range pendingModelEvents {
+			messages = append(messages, message)
+			delete(pendingModelEvents, id)
 		}
-		messages = append(messages, message)
 	}
+	for scanner.Scan() {
+		lineMessages := extractConversationMessagesFromJSONLine(scanner.Bytes())
+		for _, message := range lineMessages {
+			if message.Text == "" {
+				continue
+			}
+			if message.Type == "model_change" && message.ID != "" {
+				pendingModelEvents[message.ID] = message
+				continue
+			}
+			if message.Type == "thinking_level_change" && message.ParentID != "" {
+				if modelMessage, ok := pendingModelEvents[message.ParentID]; ok {
+					modelMessage.Text += " · " + message.Text
+					messages = append(messages, modelMessage)
+					delete(pendingModelEvents, message.ParentID)
+					continue
+				}
+			}
+			flushPendingModels()
+			messages = append(messages, message)
+		}
+	}
+	flushPendingModels()
 	if err := scanner.Err(); err != nil {
 		return nil, err
 	}
@@ -904,16 +934,34 @@ func extractConversationMessages(path string) ([]ConversationMessage, error) {
 	return messages, nil
 }
 
-func extractConversationMessageFromJSONLine(line []byte) ConversationMessage {
+func extractConversationMessagesFromJSONLine(line []byte) []ConversationMessage {
 	var payload map[string]any
 	if err := json.Unmarshal(line, &payload); err != nil {
-		return ConversationMessage{}
+		return nil
 	}
 	payloadType := stringValue(payload["type"])
+	timestamp := stringValue(payload["timestamp"])
+	id := stringValue(payload["id"])
+	parentID := stringValue(payload["parentId"])
+
+	switch payloadType {
+	case "session":
+		return nil
+	case "model_change":
+		return []ConversationMessage{{ID: id, ParentID: parentID, Role: "event", Type: "model_change", Timestamp: timestamp, Text: fmt.Sprintf("model: %s/%s", stringValue(payload["provider"]), stringValue(payload["modelId"]))}}
+	case "thinking_level_change":
+		return []ConversationMessage{{ID: id, ParentID: parentID, Role: "event", Type: "thinking_level_change", Timestamp: timestamp, Text: fmt.Sprintf("thinking: %s", stringValue(payload["thinkingLevel"]))}}
+	}
 
 	if payloadType == "response_item" {
 		if nested, ok := payload["payload"].(map[string]any); ok {
-			return conversationMessageFromMap(nested, stringValue(payload["timestamp"]))
+			return conversationMessagesFromMap(nested, timestamp, id, parentID)
+		}
+	}
+
+	if payloadType != "" && payloadType != "message" && payloadType != "user" && payloadType != "assistant" && stringValue(payload["role"]) == "" {
+		if _, ok := payload["message"].(map[string]any); !ok {
+			return []ConversationMessage{{ID: id, ParentID: parentID, Role: "event", Type: payloadType, Timestamp: timestamp, Text: compactJSONValue(payload), HiddenByDefault: true}}
 		}
 	}
 
@@ -930,7 +978,7 @@ func extractConversationMessageFromJSONLine(line []byte) ConversationMessage {
 			if role == "model" {
 				nested["role"] = "assistant"
 			}
-			return conversationMessageFromMap(nested, firstNonEmptyString(stringValue(payload["timestamp"]), stringValue(nested["timestamp"])))
+			return conversationMessagesFromMap(nested, firstNonEmptyString(timestamp, stringValue(nested["timestamp"])), id, parentID)
 		}
 	}
 
@@ -940,29 +988,127 @@ func extractConversationMessageFromJSONLine(line []byte) ConversationMessage {
 		}
 	}
 
-	return conversationMessageFromMap(payload, stringValue(payload["timestamp"]))
+	return conversationMessagesFromMap(payload, timestamp, id, parentID)
 }
 
-func conversationMessageFromMap(message map[string]any, timestamp string) ConversationMessage {
+func conversationMessagesFromMap(message map[string]any, timestamp string, id string, parentID string) []ConversationMessage {
 	role := stringValue(message["role"])
-	if role != "user" && role != "assistant" {
-		return ConversationMessage{}
+	if role != "user" && role != "assistant" && role != "toolResult" && role != "bashExecution" {
+		return nil
 	}
 
-	text := messageContentText(message["content"])
-	if text == "" {
+	if role == "toolResult" || role == "bashExecution" {
+		text := firstNonEmptyString(messageContentText(message["content"]), stringValue(message["output"]), stringValue(message["text"]))
+		text = strings.TrimSpace(text)
+		if text == "" {
+			return nil
+		}
+		return []ConversationMessage{{
+			ID:              id,
+			ParentID:        parentID,
+			Role:            role,
+			Type:            role,
+			Timestamp:       timestamp,
+			Text:            text,
+			ToolName:        stringValue(message["toolName"]),
+			ToolCallID:      stringValue(message["toolCallId"]),
+			IsError:         boolValue(message["isError"]),
+			HiddenByDefault: true,
+		}}
+	}
+
+	messages := conversationMessagesFromContent(role, timestamp, message["content"])
+	if len(messages) == 0 {
 		// Qwen Code and other Claude forks carry text under "parts" instead of "content".
-		text = messageContentText(message["parts"])
+		messages = conversationMessagesFromContent(role, timestamp, message["parts"])
 	}
-	if text == "" {
-		text = firstNonEmptyString(stringValue(message["text"]), stringValue(message["lastPrompt"]))
+	if len(messages) == 0 {
+		text := strings.TrimSpace(firstNonEmptyString(stringValue(message["text"]), stringValue(message["lastPrompt"])))
+		if text != "" {
+			messages = append(messages, ConversationMessage{Role: role, Type: "text", Timestamp: timestamp, Text: text})
+		}
 	}
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return ConversationMessage{}
+	for index := range messages {
+		messages[index].ID = id
+		messages[index].ParentID = parentID
 	}
+	return messages
+}
 
-	return ConversationMessage{Role: role, Timestamp: timestamp, Text: text}
+func conversationMessagesFromContent(role string, timestamp string, content any) []ConversationMessage {
+	switch typed := content.(type) {
+	case string:
+		text := strings.TrimSpace(typed)
+		if text == "" {
+			return nil
+		}
+		return []ConversationMessage{{Role: role, Type: "text", Timestamp: timestamp, Text: text}}
+	case []any:
+		messages := make([]ConversationMessage, 0, len(typed))
+		textParts := []string{}
+		flushText := func() {
+			text := strings.TrimSpace(strings.Join(textParts, "\n\n"))
+			if text != "" {
+				messages = append(messages, ConversationMessage{Role: role, Type: "text", Timestamp: timestamp, Text: text})
+			}
+			textParts = nil
+		}
+		for _, item := range typed {
+			itemMap, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			itemType := stringValue(itemMap["type"])
+			switch itemType {
+			case "toolCall":
+				flushText()
+				text := strings.TrimSpace(firstNonEmptyString(stringValue(itemMap["name"]), "tool call"))
+				if arguments := compactJSONValue(itemMap["arguments"]); arguments != "" {
+					text += "\n" + arguments
+				}
+				messages = append(messages, ConversationMessage{Role: role, Type: "toolCall", Timestamp: timestamp, Text: text, ToolName: stringValue(itemMap["name"]), ToolCallID: stringValue(itemMap["id"]), HiddenByDefault: true})
+			case "thinking":
+				flushText()
+				text := strings.TrimSpace(firstNonEmptyString(stringValue(itemMap["thinking"]), stringValue(itemMap["text"])))
+				if text != "" {
+					messages = append(messages, ConversationMessage{Role: role, Type: "thinking", Timestamp: timestamp, Text: text, HiddenByDefault: true})
+				}
+			case "image":
+				flushText()
+				messages = append(messages, ConversationMessage{Role: role, Type: "image", Timestamp: timestamp, Text: "Image attachment", HiddenByDefault: true})
+			case "tool_result", "toolResult", "function_call_output":
+				flushText()
+				text := strings.TrimSpace(firstNonEmptyString(stringValue(itemMap["text"]), stringValue(itemMap["content"])))
+				if text != "" {
+					messages = append(messages, ConversationMessage{Role: "toolResult", Type: itemType, Timestamp: timestamp, Text: text, HiddenByDefault: true})
+				}
+			default:
+				if text := firstNonEmptyString(stringValue(itemMap["text"]), stringValue(itemMap["content"])); text != "" {
+					textParts = append(textParts, text)
+				}
+			}
+		}
+		flushText()
+		return messages
+	default:
+		return nil
+	}
+}
+
+func compactJSONValue(value any) string {
+	if value == nil {
+		return ""
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return ""
+	}
+	return string(encoded)
+}
+
+func boolValue(value any) bool {
+	typed, ok := value.(bool)
+	return ok && typed
 }
 
 func messageContentText(content any) string {

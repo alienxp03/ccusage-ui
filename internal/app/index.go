@@ -101,6 +101,7 @@ type ProjectSummary struct {
 	TotalTokens         int64            `json:"totalTokens"`
 	TotalCost           float64          `json:"totalCost"`
 	ModelBreakdowns     []ModelBreakdown `json:"modelBreakdowns"`
+	Activity            ActivitySummary  `json:"activity"`
 	RecentSessions      []IndexedSession `json:"recentSessions"`
 }
 
@@ -142,6 +143,7 @@ type IndexedSession struct {
 	Model                 string           `json:"model"`
 	Provider              string           `json:"provider"`
 	ReasoningLevel        string           `json:"reasoningLevel"`
+	Activity              ActivitySummary  `json:"activity"`
 }
 
 func (a *App) RefreshProjectIndex(req IndexRequest) (ProjectIndexResponse, error) {
@@ -396,6 +398,9 @@ func migrateIndexDB(db *sql.DB) error {
 	if err := ensureColumn(db, "project_sessions", "reasoning_level", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
+	if err := ensureColumn(db, "project_sessions", "activity_json", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -451,8 +456,8 @@ func replaceIndexedSessions(db *sql.DB, rows []ReportRow, indexedAt string) erro
 	insertSession, err := tx.Prepare(`INSERT INTO project_sessions (
 		session_key, session_id, agent, project_path, project_name, logical_project_path, logical_project_name, grouping_rule, last_activity,
 		input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
-		total_tokens, total_cost, models_json, raw_json, indexed_at, originator, client_source, model, provider, reasoning_level
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+		total_tokens, total_cost, models_json, raw_json, indexed_at, originator, client_source, model, provider, reasoning_level, activity_json
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return err
 	}
@@ -545,6 +550,8 @@ func replaceIndexedSessions(db *sql.DB, rows []ReportRow, indexedAt string) erro
 
 		modelsJSON, _ := json.Marshal(row.ModelsUsed)
 		rawJSON, _ := json.Marshal(row.Raw)
+		activity := readSessionActivity(agent, sessionID, row.TotalCost)
+		activityJSON, _ := json.Marshal(activity)
 
 		if _, err := insertSession.Exec(
 			sessionKey,
@@ -570,6 +577,7 @@ func replaceIndexedSessions(db *sql.DB, rows []ReportRow, indexedAt string) erro
 			model,
 			provider,
 			reasoningLevel,
+			string(activityJSON),
 		); err != nil {
 			return err
 		}
@@ -671,6 +679,11 @@ func readProjectIndex(db *sql.DB, dbPath string, filter indexFilter) (ProjectInd
 		projects[index].Agents = agentsByProject[projectPath]
 		projects[index].ModelBreakdowns = modelsByProject[projectPath]
 		projects[index].RecentSessions = sessionsByProject[projectPath]
+		activitySummaries := make([]ActivitySummary, 0, len(projects[index].RecentSessions))
+		for _, session := range projects[index].RecentSessions {
+			activitySummaries = append(activitySummaries, session.Activity)
+		}
+		projects[index].Activity = aggregateActivitySummaries(activitySummaries, projects[index].TotalCost)
 		projects[index].PhysicalPaths = physicalPathsByProject[projectPath]
 		projects[index].PathExists = projectPathExists(projectPath)
 	}
@@ -794,7 +807,8 @@ func readAllProjectSessions(db *sql.DB, filter indexFilter) (map[string][]Indexe
 		client_source,
 		model,
 		provider,
-		reasoning_level
+		reasoning_level,
+		activity_json
 	FROM project_sessions`+whereClause+`
 	ORDER BY logical_project_path, last_activity DESC`, args...)
 	if err != nil {
@@ -806,6 +820,7 @@ func readAllProjectSessions(db *sql.DB, filter indexFilter) (map[string][]Indexe
 	for rows.Next() {
 		logicalProjectPath := ""
 		sessionKey := ""
+		activityJSON := ""
 		session := IndexedSession{}
 		if err := rows.Scan(
 			&sessionKey,
@@ -830,10 +845,12 @@ func readAllProjectSessions(db *sql.DB, filter indexFilter) (map[string][]Indexe
 			&session.Model,
 			&session.Provider,
 			&session.ReasoningLevel,
+			&activityJSON,
 		); err != nil {
 			return nil, err
 		}
 		session.ModelBreakdowns = modelsBySession[sessionKey]
+		_ = json.Unmarshal([]byte(activityJSON), &session.Activity)
 		sessionsByProject[logicalProjectPath] = append(sessionsByProject[logicalProjectPath], session)
 	}
 	return sessionsByProject, rows.Err()
@@ -942,7 +959,8 @@ func readProjectSessions(db *sql.DB, projectPath string) ([]IndexedSession, erro
 		client_source,
 		model,
 		provider,
-		reasoning_level
+		reasoning_level,
+		activity_json
 	FROM project_sessions
 	WHERE project_path = ?
 	ORDER BY last_activity DESC
@@ -955,6 +973,7 @@ func readProjectSessions(db *sql.DB, projectPath string) ([]IndexedSession, erro
 	sessions := []IndexedSession{}
 	for rows.Next() {
 		sessionKey := ""
+		activityJSON := ""
 		session := IndexedSession{}
 		if err := rows.Scan(
 			&sessionKey,
@@ -978,9 +997,11 @@ func readProjectSessions(db *sql.DB, projectPath string) ([]IndexedSession, erro
 			&session.Model,
 			&session.Provider,
 			&session.ReasoningLevel,
+			&activityJSON,
 		); err != nil {
 			return nil, err
 		}
+		_ = json.Unmarshal([]byte(activityJSON), &session.Activity)
 		models, err := readSessionModels(db, sessionKey)
 		if err != nil {
 			return nil, err

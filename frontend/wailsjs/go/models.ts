@@ -1,5 +1,100 @@
 export namespace app {
 	
+	export class ActivityBreakdown {
+	    surface?: string;
+	    toolName?: string;
+	    provider?: string;
+	    operation?: string;
+	    calls: number;
+	    errors: number;
+	    inputChars: number;
+	    outputChars: number;
+	    estimatedTokens: number;
+	    observedTokens: number;
+	    estimatedCost: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new ActivityBreakdown(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.surface = source["surface"];
+	        this.toolName = source["toolName"];
+	        this.provider = source["provider"];
+	        this.operation = source["operation"];
+	        this.calls = source["calls"];
+	        this.errors = source["errors"];
+	        this.inputChars = source["inputChars"];
+	        this.outputChars = source["outputChars"];
+	        this.estimatedTokens = source["estimatedTokens"];
+	        this.observedTokens = source["observedTokens"];
+	        this.estimatedCost = source["estimatedCost"];
+	    }
+	}
+	export class ActivityTotals {
+	    calls: number;
+	    errors: number;
+	    inputChars: number;
+	    outputChars: number;
+	    estimatedTokens: number;
+	    observedTokens: number;
+	    estimatedCost: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new ActivityTotals(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.calls = source["calls"];
+	        this.errors = source["errors"];
+	        this.inputChars = source["inputChars"];
+	        this.outputChars = source["outputChars"];
+	        this.estimatedTokens = source["estimatedTokens"];
+	        this.observedTokens = source["observedTokens"];
+	        this.estimatedCost = source["estimatedCost"];
+	    }
+	}
+	export class ActivitySummary {
+	    surfaces: ActivityBreakdown[];
+	    tools: ActivityBreakdown[];
+	    integrations: ActivityBreakdown[];
+	    operations: ActivityBreakdown[];
+	    totals: ActivityTotals;
+	
+	    static createFrom(source: any = {}) {
+	        return new ActivitySummary(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.surfaces = this.convertValues(source["surfaces"], ActivityBreakdown);
+	        this.tools = this.convertValues(source["tools"], ActivityBreakdown);
+	        this.integrations = this.convertValues(source["integrations"], ActivityBreakdown);
+	        this.operations = this.convertValues(source["operations"], ActivityBreakdown);
+	        this.totals = this.convertValues(source["totals"], ActivityTotals);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
 	export class ProjectGroupingRule {
 	    name: string;
 	    matchPath: string;
@@ -85,9 +180,16 @@ export namespace app {
 		}
 	}
 	export class ConversationMessage {
+	    id?: string;
+	    parentId?: string;
 	    role: string;
+	    type: string;
 	    timestamp: string;
 	    text: string;
+	    toolName?: string;
+	    toolCallId?: string;
+	    isError?: boolean;
+	    hiddenByDefault: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new ConversationMessage(source);
@@ -95,9 +197,16 @@ export namespace app {
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.parentId = source["parentId"];
 	        this.role = source["role"];
+	        this.type = source["type"];
 	        this.timestamp = source["timestamp"];
 	        this.text = source["text"];
+	        this.toolName = source["toolName"];
+	        this.toolCallId = source["toolCallId"];
+	        this.isError = source["isError"];
+	        this.hiddenByDefault = source["hiddenByDefault"];
 	    }
 	}
 	export class ModelBreakdown {
@@ -218,6 +327,7 @@ export namespace app {
 	    model: string;
 	    provider: string;
 	    reasoningLevel: string;
+	    activity: ActivitySummary;
 	
 	    static createFrom(source: any = {}) {
 	        return new IndexedSession(source);
@@ -246,6 +356,7 @@ export namespace app {
 	        this.model = source["model"];
 	        this.provider = source["provider"];
 	        this.reasoningLevel = source["reasoningLevel"];
+	        this.activity = this.convertValues(source["activity"], ActivitySummary);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -305,6 +416,7 @@ export namespace app {
 	    totalTokens: number;
 	    totalCost: number;
 	    modelBreakdowns: ModelBreakdown[];
+	    activity: ActivitySummary;
 	    recentSessions: IndexedSession[];
 	
 	    static createFrom(source: any = {}) {
@@ -328,6 +440,7 @@ export namespace app {
 	        this.totalTokens = source["totalTokens"];
 	        this.totalCost = source["totalCost"];
 	        this.modelBreakdowns = this.convertValues(source["modelBreakdowns"], ModelBreakdown);
+	        this.activity = this.convertValues(source["activity"], ActivitySummary);
 	        this.recentSessions = this.convertValues(source["recentSessions"], IndexedSession);
 	    }
 	

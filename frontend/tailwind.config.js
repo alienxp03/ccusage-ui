@@ -4,6 +4,16 @@ export default {
   theme: {
     extend: {
       colors: {
+        background: "rgb(var(--color-bg) / <alpha-value>)",
+        foreground: "rgb(var(--color-text) / <alpha-value>)",
+        muted: "rgb(var(--color-surface) / <alpha-value>)",
+        "muted-foreground": "rgb(var(--color-muted) / <alpha-value>)",
+        border: "rgb(var(--color-line) / <alpha-value>)",
+        accent: "rgb(var(--color-surface) / <alpha-value>)",
+        "accent-foreground": "rgb(var(--color-text) / <alpha-value>)",
+        primary: "rgb(var(--color-accent) / <alpha-value>)",
+        "primary-foreground": "rgb(var(--color-text) / <alpha-value>)",
+        destructive: "239 68 68",
         app: {
           bg: "rgb(var(--color-bg) / <alpha-value>)",
           sidebar: "rgb(var(--color-sidebar) / <alpha-value>)",

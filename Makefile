@@ -15,7 +15,7 @@ run:
 	open build/bin/ccusage-ui.app
 
 dev:
-	$(WAILS) dev -noreload
+	$(WAILS) dev
 
 build:
 	$(WAILS) build
