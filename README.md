@@ -16,11 +16,11 @@ The app shows ccusage reports, indexes sessions locally for project views, suppo
 
 ## Requirements
 
-- Mise (for `make setup`)
-- Go, matching `go.mod` (installed by `make setup`)
-- Bun (installed by `make setup`)
-- Wails CLI (provided by the project's Go module; no global install needed)
-- A ccusage runner. The app detects one in this order:
+- Mise for project tasks and tool version management. Managed by Mise:
+  - Go + Wails CLI
+  - Node
+  - Bun
+- A [ccusage](https://github.com/ccusage/ccusage) runner. The app detects one in this order:
   1. `ccusage` on `PATH`
   2. `bunx ccusage`
   3. `nix run github:ccusage/ccusage --`
@@ -30,7 +30,7 @@ The app shows ccusage reports, indexes sessions locally for project views, suppo
 Recommended local setup:
 
 ```bash
-make setup
+mise setup
 ```
 
 Wails is run from the project's Go module with `go run`; it does not need to be installed globally.
@@ -39,8 +39,8 @@ The app can run `ccusage` from `PATH`, or fall back to `bunx`, `nix`, `npx`, or 
 ## Development
 
 ```bash
-make setup
-make dev
+mise setup
+mise dev
 ```
 
 This starts Wails dev mode and Vite HMR for frontend changes.
@@ -48,7 +48,7 @@ This starts Wails dev mode and Vite HMR for frontend changes.
 ## Build and run locally
 
 ```bash
-make run
+mise local
 ```
 
 This builds the Wails app and opens the generated macOS app bundle.
@@ -56,7 +56,7 @@ This builds the Wails app and opens the generated macOS app bundle.
 To only build:
 
 ```bash
-make build
+mise build
 ```
 
 or use the project-local Wails CLI directly:
@@ -68,8 +68,8 @@ go run github.com/wailsapp/wails/v2/cmd/wails build
 ## Tests
 
 ```bash
-go test ./...
-make frontend-build
+mise test
+mise frontend-build
 ```
 
 ## GitHub Actions macOS build
